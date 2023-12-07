@@ -87,14 +87,14 @@ peg::parser! {
             = _* "`" val:$([^'`']*) "`" { val }
 
         rule as_ident() -> &'input str
-            = "AS" _+ val:ident() { val }
+            = ("AS" / "as")  _+ val:ident() { val }
 
         rule result_column() -> ResultColumn<'input>
             = value:expr() _* as_name:as_ident()? { ResultColumn { value, as_name } }
 
 
         rule stmt_select() -> Query<'input>
-            = "SELECT" _ cols:result_column() ++ "," _ "FROM" _ table:ident() { Query::Select(StmtSelect { cols, table }) }
+            = ("SELECT" / "select") _ cols:result_column() ++ "," _ ("FROM" / "from") _ table:ident() { Query::Select(StmtSelect { cols, table }) }
 
         pub rule query() -> Query<'input>
             = dotcmd() / stmt_select()
@@ -139,7 +139,7 @@ impl ExpressionExecutor for CountExecutor {
 fn create_executor_for_expr(expr: &Expression) -> Result<'static, Box<dyn ExpressionExecutor>> {
     match expr {
         Expression::Function { name, arguments } => match *name {
-            "COUNT" => match arguments {
+            "COUNT" | "count" => match arguments {
                 FunctionArguments::Star => Ok(Box::new(CountExecutor::new())),
                 _ => Err(DbError::InvalidArgument(
                     "COUNT(...) function",
