@@ -1,8 +1,11 @@
 use anyhow::{bail, Context};
 use nom::bytes::complete as bytes;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
 use std::path::PathBuf;
+use std::sync::{Arc, PoisonError, RwLock};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -13,6 +16,8 @@ enum DbError<'a> {
     OwnedParseError(nom::Err<nom::error::Error<Vec<u8>>>),
     #[error("invalid enum value for {0} (got {1})")]
     InvalidEnum(&'static str, u32),
+    #[error("Invalid varint of length {0}, with last byte {1}")]
+    InvalidVarint(u32, u8),
     #[error("invalid argument value for {0} (got {1})")]
     InvalidArgument(&'static str, String),
     #[error("filesystem i/o error")]
@@ -20,23 +25,41 @@ enum DbError<'a> {
         #[from]
         source: std::io::Error,
     },
+    #[error("failed to get lock")]
+    PoisonError(String),
+    #[error("failed to parse string")]
+    Utf8Error {
+        #[from]
+        source: std::str::Utf8Error,
+    },
 }
 
 impl DbError<'_> {
     pub fn to_owned<'a>(self) -> DbError<'static> {
         match self {
-            DbError::ParseError(nom::Err::Error(err)) => {
-                DbError::OwnedParseError(nom::Err::Error(nom::error::Error::new(Vec::from(err.input), err.code)))
-            },
-            DbError::ParseError(nom::Err::Failure(err)) => {
-                DbError::OwnedParseError(nom::Err::Failure(nom::error::Error::new(Vec::from(err.input), err.code)))
-            },
-            DbError::ParseError(nom::Err::Incomplete(needed)) => DbError::ParseError(nom::Err::Incomplete(needed)),
+            DbError::ParseError(nom::Err::Error(err)) => DbError::OwnedParseError(nom::Err::Error(
+                nom::error::Error::new(Vec::from(err.input), err.code),
+            )),
+            DbError::ParseError(nom::Err::Failure(err)) => DbError::OwnedParseError(
+                nom::Err::Failure(nom::error::Error::new(Vec::from(err.input), err.code)),
+            ),
+            DbError::ParseError(nom::Err::Incomplete(needed)) => {
+                DbError::ParseError(nom::Err::Incomplete(needed))
+            }
             DbError::OwnedParseError(err) => DbError::OwnedParseError(err),
             DbError::InvalidEnum(msg, value) => DbError::InvalidEnum(msg, value),
+            DbError::InvalidVarint(len, last_byte) => DbError::InvalidVarint(len, last_byte),
             DbError::InvalidArgument(msg, value) => DbError::InvalidArgument(msg, value),
-            DbError::IoError { source } => DbError::IoError { source }
+            DbError::IoError { source } => DbError::IoError { source },
+            DbError::PoisonError(msg) => DbError::PoisonError(msg),
+            DbError::Utf8Error { source } => DbError::Utf8Error { source },
         }
+    }
+}
+
+impl<G> From<PoisonError<G>> for DbError<'_> {
+    fn from(value: PoisonError<G>) -> Self {
+        DbError::PoisonError(format!("{value:?}"))
     }
 }
 
@@ -59,13 +82,39 @@ impl<'a> Into<nom::Err<DbError<'a>>> for DbError<'a> {
 
 type Result<'a, O> = std::result::Result<(&'a [u8], O), DbError<'a>>;
 
-trait Parse {
-    fn parse(data: &[u8]) -> Result<Self>
+trait Parse<'a> {
+    fn parse(data: &'a [u8]) -> Result<'a, Self>
     where
         Self: Sized;
 }
 
-impl Parse for u32 {
+trait ParseWithBlockOffset<'a> {
+    fn parse_in_block(
+        data: &'a [u8],
+        usable_page_size: usize,
+        offset_from_block_start: usize,
+    ) -> Result<'a, Self>
+    where
+        Self: Sized + 'a;
+}
+
+impl<'a, T> ParseWithBlockOffset<'a> for T
+where
+    T: Sized + Parse<'a>,
+{
+    fn parse_in_block(
+        data: &'a [u8],
+        _usable_page_size: usize,
+        _offset_from_block_start: usize,
+    ) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        T::parse(data)
+    }
+}
+
+impl Parse<'_> for u32 {
     fn parse(data: &[u8]) -> Result<Self> {
         let (data, value) = bytes::take(4usize)(data)?;
         let value = u32::from_be_bytes(
@@ -77,7 +126,7 @@ impl Parse for u32 {
     }
 }
 
-impl Parse for i32 {
+impl Parse<'_> for i32 {
     fn parse(data: &[u8]) -> Result<Self> {
         let (data, value) = bytes::take(4usize)(data)?;
         let value = i32::from_be_bytes(
@@ -89,7 +138,7 @@ impl Parse for i32 {
     }
 }
 
-impl Parse for u16 {
+impl Parse<'_> for u16 {
     fn parse(data: &[u8]) -> Result<Self> {
         let (data, value) = bytes::take(2usize)(data)?;
         let value = u16::from_be_bytes(
@@ -101,7 +150,7 @@ impl Parse for u16 {
     }
 }
 
-impl Parse for u8 {
+impl Parse<'_> for u8 {
     fn parse(data: &[u8]) -> Result<Self> {
         let (data, value) = bytes::take(1usize)(data)?;
         let value = u8::from_be_bytes(
@@ -113,14 +162,72 @@ impl Parse for u8 {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+impl Parse<'_> for f64 {
+    fn parse(data: &[u8]) -> Result<Self> {
+        let (data, value) = bytes::take(8usize)(data)?;
+        Ok((
+            data,
+            f64::from_be_bytes(
+                value
+                    .try_into()
+                    .expect("We've taken 8 bytes, this should be OK"),
+            ),
+        ))
+    }
+}
+
+fn parse_varint(data: &[u8]) -> Result<i64> {
+    let taken = RefCell::new(0);
+    let (data, varint_bytes) = bytes::take_while(|b| {
+        let mut taken = taken.borrow_mut();
+        if *taken < 8 {
+            *taken += 1;
+            0 != (b & 0x80)
+        } else {
+            false
+        }
+    })(data)?;
+
+    let taken = *taken.borrow();
+
+    let mut ret = 0;
+    for b in varint_bytes {
+        ret <<= 7;
+        ret |= (b & 0x7F) as i64;
+    }
+    let (data, last_byte) = bytes::take(1usize)(data)?;
+    let last_byte = last_byte[0];
+    let nine_byte_long = taken >= 8;
+    if nine_byte_long && 0 != (last_byte & 0x80) {
+        return Err(DbError::InvalidVarint(taken + 1, last_byte));
+    }
+    // The ninth byte of a varint uses all of it's
+
+    ret <<= if nine_byte_long { 8 } else { 7 };
+    ret |= last_byte as i64;
+
+    Ok((data, ret))
+}
+
+fn parse_int(data: &[u8], byte_len: usize) -> Result<'_, i64> {
+    let (data, value_bytes) = bytes::take(byte_len)(data)?;
+    // Sign extent
+    let fill = if 0 != (data[0] & 0x80) { 0xFF } else { 0x00 };
+    let mut buffer = [fill; 8];
+
+    buffer[8 - byte_len..].copy_from_slice(value_bytes);
+
+    Ok((data, i64::from_be_bytes(buffer)))
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum TextEncoding {
     UTF8 = 1,
     UTF16le = 2,
     UTF16be = 3,
 }
 
-impl Parse for TextEncoding {
+impl Parse<'_> for TextEncoding {
     fn parse(data: &[u8]) -> Result<Self>
     where
         Self: Sized,
@@ -136,7 +243,7 @@ impl Parse for TextEncoding {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Header {
     /// Determines the page size of the database.
     ///
@@ -258,7 +365,7 @@ struct Header {
     sqlite_version: u32,
 }
 
-impl Parse for Header {
+impl Parse<'_> for Header {
     fn parse(data: &[u8]) -> Result<Header> {
         let (data, _header) = bytes::tag(b"SQLite format 3\0")(data)?;
         let (data, page_size) = u16::parse(data)?;
@@ -317,12 +424,414 @@ impl Header {
             _ => self.page_size as usize,
         }
     }
+
+    pub fn usable_page_size(&self) -> usize {
+        self.page_size() - self.reserved_bytes_per_page as usize
+    }
 }
 
-struct Page(Vec<u8>);
+#[derive(Debug)]
+struct Page {
+    data: Vec<u8>,
+    offset_from_start: usize,
+}
 
+impl Page {
+    fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    fn offset_from_start(&self) -> usize {
+        self.offset_from_start
+    }
+}
+
+#[derive(Debug)]
+struct TableLeafData<'a> {
+    cells: &'a [u16],
+    content_area: &'a [u8],
+    offset_to_start_of_content: usize,
+    usable_page_size: usize,
+}
+
+struct CellData<'a> {
+    data_in_leaf: &'a [u8],
+    total_data_length: usize,
+    overflow_page: Option<u32>,
+}
+
+impl TableLeafData<'_> {
+    fn read_cell(&self, index: usize) -> Result<CellData<'_>> {
+        let offset = u16::from_be(self.cells[index]) as usize;
+        assert!(offset >= self.offset_to_start_of_content);
+        let offset = offset - self.offset_to_start_of_content;
+
+        let cell_data = &self.content_area[offset..];
+        let (cell_data, length) = parse_varint(cell_data)?;
+        let length = length as usize;
+
+        // Variable names and calculations copied from sqlite spec
+        let u = self.usable_page_size;
+        let x = u - 35;
+        let p = length;
+        let bytes_stored_on_page = if p <= x {
+            p
+        } else {
+            let m = ((u - 12) * 32 / 255) - 23;
+            let k = m + ((p - m) % (u - 4));
+            if k <= x {
+                k
+            } else {
+                m
+            }
+        };
+
+        let (data_after_rowid, _rowid) = parse_varint(cell_data)?;
+        let rowid_len = data_after_rowid.as_ptr() as usize - cell_data.as_ptr() as usize;
+        let bytes_stored_on_page = bytes_stored_on_page + rowid_len;
+        let length = length + rowid_len;
+
+        let cell_data = &cell_data[..bytes_stored_on_page];
+        let (cell_data, overflow_page) = if bytes_stored_on_page < length {
+            let (cell_data, overflow_page_bytes) = cell_data.split_at(bytes_stored_on_page - 4);
+            let (_, overflow_page) = u32::parse(overflow_page_bytes)?;
+            (cell_data, Some(overflow_page))
+        } else {
+            (cell_data, None)
+        };
+
+        Ok((
+            &[],
+            CellData {
+                data_in_leaf: cell_data,
+                total_data_length: length,
+                overflow_page,
+            },
+        ))
+    }
+
+    fn cell_count(&self) -> usize {
+        self.cells.len()
+    }
+}
+
+impl<'a> ParseWithBlockOffset<'a> for TableLeafData<'a> {
+    fn parse_in_block(
+        data: &'a [u8],
+        usable_page_size: usize,
+        offset_from_block_start: usize,
+    ) -> Result<'a, TableLeafData<'a>> {
+        let input_data = data;
+        let (data, first_freeblock) = u16::parse(data)?;
+        let (data, number_of_cells) = u16::parse(data)?;
+        let (data, offset_to_start_of_content) = u16::parse(data)?;
+        let (data, fragmented_free_bytes_count) = u8::parse(data)?;
+        let (_, cell_data) = bytes::take(number_of_cells as usize * 2)(data)?;
+        let offset_to_start_of_content = if offset_to_start_of_content == 0 {
+            65536
+        } else {
+            offset_to_start_of_content as usize
+        } - offset_from_block_start;
+
+        let content_area = &input_data[offset_to_start_of_content..];
+        let offset_to_start_of_content = offset_from_block_start
+            + (content_area.as_ptr() as usize - input_data.as_ptr() as usize);
+
+        // Safety:
+        //  1. The cell data is guaranteed to be properly aligned within block
+        //  2. We are transmuting primitive types, i.e. all bit patterns of 2-byte range are valid u16
+        //  3. The reads of these u16s will happen via u16::from_be() to guarantee endianness independence
+        let (begin, cells, end) = unsafe { cell_data.align_to::<u16>() };
+        // cell_data must have been properly aligned, unless we started with a not-aligned block, which is invalid
+        assert!(begin.is_empty());
+        assert!(end.is_empty());
+
+        Ok((
+            &[],
+            TableLeafData {
+                cells,
+                content_area,
+                usable_page_size,
+                offset_to_start_of_content,
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+enum ParsedBTreePage<'a> {
+    TableLeaf(TableLeafData<'a>),
+    TableInterior,
+    IndexLeaf,
+    IndexInterior,
+}
+
+impl<'a> ParseWithBlockOffset<'a> for ParsedBTreePage<'a> {
+    fn parse_in_block(
+        data: &'a [u8],
+        page_size: usize,
+        offset_from_block_start: usize,
+    ) -> Result<Self> {
+        let (data, type_value) = u8::parse(data)?;
+        let ret = match type_value {
+            2 => Ok((data, ParsedBTreePage::IndexInterior)),
+            5 => Ok((data, ParsedBTreePage::TableInterior)),
+            10 => Ok((data, ParsedBTreePage::IndexLeaf)),
+            13 => {
+                let (rest, data) =
+                    TableLeafData::parse_in_block(data, page_size, offset_from_block_start + 1)?;
+                Ok((rest, ParsedBTreePage::TableLeaf(data)))
+            }
+            _ => Err(DbError::InvalidEnum("page type", type_value as u32)),
+        }?;
+        Ok(ret)
+    }
+}
+
+#[derive(Debug)]
+struct Table<'a> {
+    database: &'a Database,
+    root_page_data: Arc<Page>,
+    root_page: ParsedBTreePage<'a>,
+    parsed_pages_cache: HashMap<u32, ParsedBTreePage<'a>>,
+}
+
+impl<'a> Table<'a> {
+    pub fn new(database: &'a Database, root_page_id: u32) -> Result<'a, Table<'a>> {
+        let root_page_data = database.read_btree_page(root_page_id)?;
+        let (_, root_page) = ParsedBTreePage::parse_in_block(
+            unsafe { std::mem::transmute(root_page_data.data()) },
+            database.header().usable_page_size(),
+            root_page_data.offset_from_start(),
+        )
+        .map_err(|e| e.to_owned())?;
+
+        Ok((
+            &[],
+            Table {
+                database,
+                root_page_data: root_page_data.clone(),
+                root_page: root_page as ParsedBTreePage<'a>,
+                parsed_pages_cache: HashMap::new(),
+            },
+        ))
+    }
+
+    pub fn iter<'b>(&'b self) -> TableIterator<'a, 'b> {
+        TableIterator::new(self)
+    }
+}
+
+#[derive(Debug)]
+enum TableRowCell {
+    Null,
+    Integer(i64),
+    Float(f64),
+    Blob(Vec<u8>),
+    String(String),
+}
+
+impl TableRowCell {
+    fn parse<'a>(tag: i64, data: &'a [u8]) -> Result<'a, Self> {
+        let (data, cell) = match tag {
+            0 => (data, TableRowCell::Null),
+            1 => parse_int(data, 1).map(|(d, v)| (d, TableRowCell::Integer(v)))?,
+            2 => parse_int(data, 2).map(|(d, v)| (d, TableRowCell::Integer(v)))?,
+            3 => parse_int(data, 3).map(|(d, v)| (d, TableRowCell::Integer(v)))?,
+            4 => parse_int(data, 4).map(|(d, v)| (d, TableRowCell::Integer(v)))?,
+            5 => parse_int(data, 6).map(|(d, v)| (d, TableRowCell::Integer(v)))?,
+            6 => parse_int(data, 8).map(|(d, v)| (d, TableRowCell::Integer(v)))?,
+            7 => f64::parse(data).map(|(d, v)| (d, TableRowCell::Float(v)))?,
+            8 => (data, TableRowCell::Integer(0)),
+            9 => (data, TableRowCell::Integer(0)),
+            10 => todo!(),
+            11 => todo!(),
+            _ => {
+                if tag % 2 == 0 {
+                    let len = ((tag - 12) / 2) as usize;
+                    let (data, value) = bytes::take(len)(data)?;
+                    (data, TableRowCell::Blob(value.into()))
+                } else {
+                    let len = ((tag - 13) / 2) as usize;
+                    let (data, value) = bytes::take(len)(data)?;
+                    // TODO: Support other text encodings
+                    let value = std::str::from_utf8(value)?;
+                    (data, TableRowCell::String(value.to_owned()))
+                }
+            }
+        };
+        Ok((data, cell))
+    }
+}
+
+#[derive(Debug)]
+struct TableRow {
+    rowid: i64,
+    cells: Vec<TableRowCell>,
+}
+
+impl TableRow {
+    fn from_cell_data(data: &[u8]) -> Result<'_, TableRow> {
+        let (data, rowid) = parse_varint(data)?;
+        let mut cells = Vec::new();
+
+        let prev_data = data;
+        let (data, header_len) = parse_varint(data)?;
+        let header_size_len = data.as_ptr() as usize - prev_data.as_ptr() as usize;
+        let (header, data) = data.split_at(header_len as usize - header_size_len);
+
+        let mut tags = Vec::new();
+        let mut header = header;
+        while !header.is_empty() {
+            let (rest, tag) = parse_varint(header)?;
+            header = rest;
+            tags.push(tag);
+        }
+
+        let mut data = data;
+        for tag in tags {
+            let (rest, cell) = TableRowCell::parse(tag, data)?;
+            data = rest;
+            cells.push(cell);
+        }
+
+        Ok((data, TableRow { rowid, cells }))
+    }
+}
+
+struct TableIterator<'a, 'b> {
+    table: &'a Table<'b>,
+    current_cell: usize,
+}
+
+impl TableIterator<'_, '_> {
+    pub fn new<'a, 'b>(table: &'a Table<'b>) -> TableIterator<'a, 'b> {
+        TableIterator {
+            table: table,
+            current_cell: 0,
+        }
+    }
+
+    fn parse_row<'a>(&self, cell: &'a CellData) -> std::result::Result<TableRow, DbError<'a>> {
+        if let Some(overflow_page) = cell.overflow_page {
+            let mut data = self.table.database.read_overflow_data(overflow_page)?;
+            data.extend_from_slice(cell.data_in_leaf);
+            assert_eq!(data.len(), cell.total_data_length);
+            data.rotate_right(cell.total_data_length - cell.data_in_leaf.len());
+
+            TableRow::from_cell_data(&data)
+                .map(|d| d.1)
+                .map_err(|e| e.to_owned())
+        } else {
+            TableRow::from_cell_data(cell.data_in_leaf).map(|d| d.1)
+        }
+    }
+}
+
+impl<'a, 'b> Iterator for TableIterator<'a, 'b> {
+    type Item = TableRow;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &self.table.root_page {
+            ParsedBTreePage::TableLeaf(data) => {
+                if self.current_cell < data.cell_count() {
+                    let cell = data.read_cell(self.current_cell).ok()?.1;
+                    self.current_cell += 1;
+                    match self.parse_row(&cell) {
+                        Ok(row) => Some(row),
+                        Err(err) => {
+                            eprintln!("Error while parsing row: {:?}", err);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+            ParsedBTreePage::TableInterior => todo!(),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum SchemaEntry {
+    Table {
+        name: String,
+        table_name: String,
+        root_page: u32,
+        sql: String,
+    },
+    Unknown {
+        type_text: String,
+        name: String,
+        table_name: String,
+        root_page: u32,
+        sql: String,
+    },
+}
+
+impl SchemaEntry {
+    fn new(mut row: TableRow) -> SchemaEntry {
+        assert_eq!(row.cells.len(), 5);
+
+        let cell = row.cells.pop().unwrap();
+        let sql = if let TableRowCell::String(sql) = cell {
+            sql
+        } else {
+            panic!("Invalid column type {:?}", cell)
+        };
+
+        let cell = row.cells.pop().unwrap();
+        let root_page = if let TableRowCell::Integer(root_page) = cell {
+            root_page as u32
+        } else {
+            panic!("Invalid column type {:?}", cell)
+        };
+
+        let cell = row.cells.pop().unwrap();
+        let table_name = if let TableRowCell::String(table_name) = cell {
+            table_name
+        } else {
+            panic!("Invalid column type {:?}", cell)
+        };
+
+        let cell = row.cells.pop().unwrap();
+        let name = if let TableRowCell::String(name) = cell {
+            name
+        } else {
+            panic!("Invalid column type {:?}", cell)
+        };
+
+        let cell = row.cells.pop().unwrap();
+        let type_text = if let TableRowCell::String(type_text) = cell {
+            type_text
+        } else {
+            panic!("Invalid column type {:?}", cell)
+        };
+
+        match type_text.as_str() {
+            "table" => SchemaEntry::Table {
+                name,
+                table_name,
+                root_page,
+                sql,
+            },
+            _ => SchemaEntry::Unknown {
+                type_text,
+                name,
+                table_name,
+                root_page,
+                sql,
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
 struct Database {
-    file: File,
+    page_cache: Arc<RwLock<HashMap<u64, Arc<Page>>>>,
+    file: Arc<RwLock<File>>,
     header: Header,
 }
 
@@ -333,19 +842,61 @@ impl Database {
         file.seek(std::io::SeekFrom::Start(0))?;
         file.read_exact(&mut header_buf)?;
         let (_, header) = Header::parse(&header_buf).map_err(|e| e.to_owned())?;
-        Ok( Database { file, header })
+
+        let mut db = Database {
+            page_cache: Arc::new(RwLock::new(HashMap::new())),
+            file: Arc::new(RwLock::new(file)),
+            header,
+        };
+
+        Ok(db)
     }
 
-    pub fn read_page(&mut self, page_id: u32) -> std::result::Result<Page, DbError<'static>> {
+    pub fn read_schema(&self) -> std::result::Result<Vec<SchemaEntry>, DbError<'static>> {
+        let schema_table = Table::new(self, 1).map_err(|e| e.to_owned())?.1;
+        Ok(schema_table.iter().map(|r| SchemaEntry::new(r)).collect())
+    }
+
+    pub fn read_btree_page(
+        &self,
+        page_id: u32,
+    ) -> std::result::Result<Arc<Page>, DbError<'static>> {
+        let mut file = self.file.write()?;
+        let mut page_cache = self.page_cache.write()?;
+
         let page_offset = match page_id {
             0 => Err(DbError::InvalidArgument("page_id", "0".into())),
             _ => Ok((page_id as u64 - 1) * self.header.page_size as u64),
         }?;
-        self.file.seek(std::io::SeekFrom::Start(page_offset))?;
-        let mut page_data = Vec::new();
-        page_data.resize(self.header.page_size(), 0u8);
-        self.file.read_exact(&mut page_data)?;
-        Ok(Page(page_data))
+        let page = if let Some(cached_page) = page_cache.get(&page_offset) {
+            cached_page.clone()
+        } else {
+            file.seek(std::io::SeekFrom::Start(page_offset))?;
+            let mut page_data = Vec::new();
+            page_data.resize(self.header.page_size(), 0u8);
+            file.read_exact(&mut page_data)?;
+            let offset_from_start = match page_offset {
+                0 => 100,
+                _ => 0,
+            };
+            page_data.rotate_left(offset_from_start);
+            page_data.truncate(self.header.usable_page_size() - offset_from_start);
+            let page = Arc::new(Page {
+                data: page_data,
+                offset_from_start,
+            });
+            page_cache.insert(page_offset, page.clone());
+            page
+        };
+
+        Ok(page)
+    }
+
+    pub fn read_overflow_data(
+        &self,
+        first_overflow_page_id: u32,
+    ) -> std::result::Result<Vec<u8>, DbError<'static>> {
+        todo!();
     }
 
     pub fn header(&self) -> &Header {
@@ -369,6 +920,15 @@ fn main() -> anyhow::Result<()> {
             let db = Database::open(&PathBuf::from(&args[1])).context("Reading database file")?;
 
             println!("database page size: {}", db.header().page_size());
+            let schema = db.read_schema()?;
+            let table_count = schema
+                .iter()
+                .filter(|t| match t {
+                    SchemaEntry::Table { name, .. } => !name.starts_with("sqlite_"),
+                    _ => false,
+                })
+                .count();
+            println!("number of tables: {table_count}");
         }
         _ => bail!("Missing or invalid command passed: {}", command),
     }
