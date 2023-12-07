@@ -31,6 +31,9 @@ pub enum DbError<'a> {
     MissingColumn(&'static str),
     #[error("expected column of type {expected}, got {got}")]
     InvalidColumnType { expected: &'static str, got: String },
+
+    #[error("requested table `{0}` was not found")]
+    TableNotFound(String),
 }
 
 impl DbError<'_> {
@@ -56,6 +59,7 @@ impl DbError<'_> {
             DbError::InvalidColumnType { expected, got } => {
                 DbError::InvalidColumnType { expected, got }
             }
+            DbError::TableNotFound(table) => DbError::TableNotFound(table),
         }
     }
 }

@@ -38,11 +38,26 @@ impl Database {
     }
 
     pub fn read_schema(&self) -> Result<'static, Vec<SchemaEntry>> {
-        let schema_table = Table::new(self, 1).map_err(|e| e.to_owned())?.1;
+        let schema_table = Table::new(self, 1).map_err(|e| e.to_owned())?;
         schema_table
             .iter()
             .map(|r| SchemaEntry::from_row(r))
             .collect()
+    }
+
+    pub fn read_table(&self, table_name: &str) -> Result<'static, Table<'_>> {
+        let schema = self
+            .read_schema()?
+            .into_iter()
+            .find_map(|schema| match schema {
+                SchemaEntry::Table {
+                    name, root_page, ..
+                } if name == table_name => Some(root_page),
+                _ => None,
+            });
+
+        let root_page = schema.ok_or_else(|| DbError::TableNotFound(table_name.to_owned()))?;
+        Table::new(self, root_page).map_err(|e| e.to_owned())
     }
 
     fn read_btree_page(&self, page_id: u32) -> Result<'static, Arc<Page>> {

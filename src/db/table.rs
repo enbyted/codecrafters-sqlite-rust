@@ -21,7 +21,7 @@ pub struct Table<'a> {
 }
 
 impl<'a> Table<'a> {
-    pub(crate) fn new(database: &'a Database, root_page_id: u32) -> ParseResult<'a, Table<'a>> {
+    pub(crate) fn new(database: &'a Database, root_page_id: u32) -> Result<'a, Table<'a>> {
         let root_page_data = database.read_btree_page(root_page_id)?;
         let (_, root_page) = ParsedBTreePage::parse_in_block(
             unsafe { std::mem::transmute(root_page_data.data()) },
@@ -30,14 +30,11 @@ impl<'a> Table<'a> {
         )
         .map_err(|e| e.to_owned())?;
 
-        Ok((
-            &[],
-            Table {
-                database,
-                root_page_data: root_page_data.clone(),
-                root_page: root_page as ParsedBTreePage<'a>,
-            },
-        ))
+        Ok(Table {
+            database,
+            root_page_data: root_page_data.clone(),
+            root_page: root_page as ParsedBTreePage<'a>,
+        })
     }
 
     pub fn iter<'b>(&'b self) -> TableIterator<'a, 'b> {
@@ -52,6 +49,18 @@ pub enum TableRowCell {
     Float(f64),
     Blob(Vec<u8>),
     String(String),
+}
+
+impl ToString for TableRowCell {
+    fn to_string(&self) -> String {
+        match self {
+            Self::Null => "NULL".to_owned(),
+            Self::String(s) => s.clone(),
+            Self::Integer(i) => i.to_string(),
+            Self::Float(f) => f.to_string(),
+            Self::Blob(b) => format!("Blob: {b:x?}"),
+        }
+    }
 }
 
 impl TableRowCell {
