@@ -87,10 +87,10 @@ peg::parser! {
             = _* "`" val:$([^'`']*) "`" { val }
 
         rule as_ident() -> &'input str
-            = ("AS" / "as")  _+ val:ident() { val }
+            = _+ ("AS" / "as")  _+ val:ident() { val }
 
         rule result_column() -> ResultColumn<'input>
-            = value:expr() _* as_name:as_ident()? { ResultColumn { value, as_name } }
+            = _* value:expr() as_name:as_ident()? { ResultColumn { value, as_name } }
 
 
         rule stmt_select() -> Query<'input>
