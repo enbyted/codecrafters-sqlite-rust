@@ -227,8 +227,11 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             for res in results {
-                for col in res {
-                    print!("{} ", col.to_string());
+                for (i, col) in res.iter().enumerate() {
+                    if i != 0 {
+                        print!(" ");
+                    }
+                    print!("{}", col.to_string());
                 }
                 println!();
             }
