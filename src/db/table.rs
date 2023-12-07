@@ -1,6 +1,6 @@
 use crate::error::{ParseResult, Result};
 use nom::bytes::complete as bytes;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use super::{
     page::{
@@ -14,9 +14,10 @@ use super::{
 #[derive(Debug)]
 pub struct Table<'a> {
     database: &'a Database,
+    #[allow(dead_code)]
+    /// This exists to guarantee that the reference in root_page will be valid
     root_page_data: Arc<Page>,
     root_page: ParsedBTreePage<'a>,
-    parsed_pages_cache: HashMap<u32, ParsedBTreePage<'a>>,
 }
 
 impl<'a> Table<'a> {
@@ -35,7 +36,6 @@ impl<'a> Table<'a> {
                 database,
                 root_page_data: root_page_data.clone(),
                 root_page: root_page as ParsedBTreePage<'a>,
-                parsed_pages_cache: HashMap::new(),
             },
         ))
     }
@@ -123,6 +123,10 @@ impl TableRow {
 
     pub fn cells(&self) -> impl Iterator<Item = &TableRowCell> {
         self.cells.iter()
+    }
+
+    pub fn rowid(&self) -> i64 {
+        self.rowid
     }
 }
 

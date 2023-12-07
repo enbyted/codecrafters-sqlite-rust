@@ -26,6 +26,7 @@ impl Parse<'_> for TextEncoding {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct Header {
     /// Determines the page size of the database.
     ///

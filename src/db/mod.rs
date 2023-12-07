@@ -30,13 +30,11 @@ impl Database {
         file.read_exact(&mut header_buf)?;
         let (_, header) = Header::parse(&header_buf).map_err(|e| e.to_owned())?;
 
-        let mut db = Database {
+        Ok(Database {
             page_cache: Arc::new(RwLock::new(HashMap::new())),
             file: Arc::new(RwLock::new(file)),
             header,
-        };
-
-        Ok(db)
+        })
     }
 
     pub fn read_schema(&self) -> Result<'static, Vec<SchemaEntry>> {

@@ -100,10 +100,10 @@ impl<'a> ParseWithBlockOffset<'a> for TableLeafData<'a> {
         offset_from_block_start: usize,
     ) -> ParseResult<'a, TableLeafData<'a>> {
         let input_data = data;
-        let (data, first_freeblock) = u16::parse(data)?;
+        let (data, _first_freeblock) = u16::parse(data)?;
         let (data, number_of_cells) = u16::parse(data)?;
         let (data, offset_to_start_of_content) = u16::parse(data)?;
-        let (data, fragmented_free_bytes_count) = u8::parse(data)?;
+        let (data, _fragmented_free_bytes_count) = u8::parse(data)?;
         let (_, cell_data) = bytes::take(number_of_cells as usize * 2)(data)?;
         let offset_to_start_of_content = if offset_to_start_of_content == 0 {
             65536
