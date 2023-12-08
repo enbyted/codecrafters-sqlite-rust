@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::{
     page::{
-        btree::{CellData, ParsedBTreePage},
+        btree::{LeafCellData, ParsedBTreePage, TableLeafData},
         Page,
     },
     parse::{parse_int, parse_varint, Parse, ParseWithBlockOffset},
@@ -159,24 +159,98 @@ impl TableRow {
     }
 }
 
+#[derive(Debug)]
 pub struct TableIterator<'a, 'b> {
     table: &'a Table<'b>,
-    current_cell: usize,
+    current_cell: Vec<(ParsedBTreePage<'b>, usize)>,
 }
 
-impl TableIterator<'_, '_> {
-    pub fn new<'a, 'b>(table: &'a Table<'b>) -> TableIterator<'a, 'b> {
+#[derive(Debug, Clone)]
+enum PageItem<'a> {
+    NextPage(u32),
+    Cell(LeafCellData<'a>),
+    EndOfPage,
+}
+
+impl<'db> TableIterator<'_, 'db> {
+    pub fn new<'a>(table: &'a Table<'db>) -> TableIterator<'a, 'db> {
         TableIterator {
             table: table,
-            current_cell: 0,
+            current_cell: Vec::from([(table.root_page.clone(), 0)]),
         }
     }
 
-    fn parse_row<'a>(&self, cell: &'a CellData) -> Result<'a, TableRow> {
-        let data = cell.read(self.table.database)?;
+    fn parse_row<'a>(&self, cell: LeafCellData<'a>) -> Result<'a, TableRow> {
+        let data = cell.read(self.table.database).map_err(|e| e.to_owned())?;
         TableRow::from_cell_data(&data)
             .map(|d| d.1)
             .map_err(|e| e.to_owned())
+    }
+
+    fn read_page_item<'a, 'b>(
+        page: &'a ParsedBTreePage<'b>,
+        index: usize,
+    ) -> Result<'a, PageItem<'b>> {
+        match page {
+            ParsedBTreePage::TableLeaf(data) => {
+                if index < data.cell_count() {
+                    let cell = data.read_cell(index).map_err(|e| e.to_owned())?.1;
+                    Ok(PageItem::Cell(cell))
+                } else {
+                    Ok(PageItem::EndOfPage)
+                }
+            }
+            ParsedBTreePage::TableInterior(data) => {
+                if index < data.cell_count() {
+                    let cell = data.read_cell(index)?.1;
+                    Ok(PageItem::NextPage(cell.left_page()))
+                } else if index == data.cell_count() {
+                    Ok(PageItem::NextPage(data.right_most_page()))
+                } else {
+                    Ok(PageItem::EndOfPage)
+                }
+            }
+            _ => panic!("Unexpected page type {page:?}"),
+        }
+    }
+
+    fn resolve_current_item(&mut self) -> Result<'db, Option<LeafCellData<'db>>> {
+        if self.current_cell.len() == 0 {
+            return Ok(None);
+        }
+
+        loop {
+            let (innermost_page, index) = self
+                .current_cell
+                .last()
+                .expect("We should alway have at least one page");
+            let innermost_item =
+                Self::read_page_item(innermost_page, *index).map_err(|e| e.to_owned())?;
+            let current_cell = &mut self.current_cell;
+
+            match innermost_item {
+                PageItem::NextPage(page) => {
+                    let page = self.table.database.read_btree_page(page)?;
+                    let page = ParsedBTreePage::parse_in_block(
+                        unsafe { std::mem::transmute(page.data()) },
+                        self.table.database.header().usable_page_size(),
+                        page.offset_from_start(),
+                    )
+                    .map_err(|e| e.to_owned())?
+                    .1;
+                    current_cell.push((page, 0));
+                }
+                PageItem::Cell(data) => return Ok(Some(data)),
+                PageItem::EndOfPage => {
+                    current_cell.pop();
+                    if let Some((page, index)) = self.current_cell.last_mut() {
+                        *index += 1;
+                    } else {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -184,24 +258,27 @@ impl<'a, 'b> Iterator for TableIterator<'a, 'b> {
     type Item = TableRow;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match &self.table.root_page {
-            ParsedBTreePage::TableLeaf(data) => {
-                if self.current_cell < data.cell_count() {
-                    let cell = data.read_cell(self.current_cell).ok()?.1;
-                    self.current_cell += 1;
-                    match self.parse_row(&cell) {
-                        Ok(row) => Some(row),
-                        Err(err) => {
-                            eprintln!("Error while parsing row: {:?}", err);
-                            None
-                        }
-                    }
-                } else {
+        match self.resolve_current_item() {
+            Ok(Some(data)) => match self.parse_row(data.clone()) {
+                Ok(row) => {
+                    let (_, index) = self
+                        .current_cell
+                        .last_mut()
+                        .expect("We just got item, the current_cell should not be empty");
+                    *index += 1;
+
+                    Some(row)
+                }
+                Err(e) => {
+                    eprintln!("Error while parsing row {e:?}, row: {data:?}");
                     None
                 }
+            },
+            Ok(None) => None,
+            Err(e) => {
+                eprintln!("Error while resolving item: {:?}, self: {:?}", e, self);
+                None
             }
-            ParsedBTreePage::TableInterior => todo!(),
-            _ => None,
         }
     }
 }

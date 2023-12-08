@@ -133,7 +133,11 @@ pub(crate) fn parse_varint(data: &[u8]) -> ParseResult<i64> {
 pub(crate) fn parse_int(data: &[u8], byte_len: usize) -> ParseResult<'_, i64> {
     let (data, value_bytes) = bytes::take(byte_len)(data)?;
     // Sign extent
-    let fill = if 0 != (data[0] & 0x80) { 0xFF } else { 0x00 };
+    let fill = if 0 != (value_bytes[0] & 0x80) {
+        0xFF
+    } else {
+        0x00
+    };
     let mut buffer = [fill; 8];
 
     buffer[8 - byte_len..].copy_from_slice(value_bytes);

@@ -23,6 +23,7 @@ pub enum TypeName {
 pub enum ColumnConstraint {
     PrimaryKey,
     AutoIncrement,
+    NotNull,
 }
 
 #[derive(Debug)]
@@ -114,14 +115,14 @@ peg::parser! {
         rule function_arguments() -> FunctionArguments<'input>
             = farg_star() / farg_list()
 
-        rule lit_string() -> Literal<'input>
-            = ("'" val:$([^'\'']*) "'" {Literal::String(val)}) / ("\"" val:$([^'"']*) "\"" {Literal::String(val)})
+        rule lit_string() -> &'input str
+            = ("'" val:$([^'\'']*) "'" {val}) / ("\"" val:$([^'"']*) "\"" {val})
 
         rule lit_integer() -> Literal<'input>
             = val:$(['-']?['0'..='9']+) {? Ok(Literal::Integer(val.parse().map_err(|_| "expected integer literal")?)) }
 
         rule literal() -> Literal<'input>
-            = lit_string() / lit_integer()
+            = (v:lit_string() {Literal::String(v)}) / lit_integer()
 
         rule binary_operator() -> BinaryOperator
             = "=" {BinaryOperator::Equals}
@@ -185,13 +186,14 @@ peg::parser! {
 
         rule column_constraint() -> ColumnConstraint
             = (k("PRIMARY") _ k("KEY") {ColumnConstraint::PrimaryKey}) /
-              (k("AUTOINCREMENT") {ColumnConstraint::AutoIncrement})
+              (k("AUTOINCREMENT") {ColumnConstraint::AutoIncrement}) /
+              (k("NOT") _ k("NULL") {ColumnConstraint::NotNull})
 
         rule column_def() -> ColumnDefinition<'input>
             = name:ident() type_name:(_ t:column_type() {t})? _? constraints:column_constraint() ** _ { ColumnDefinition { name, type_name: type_name.unwrap_or(TypeName::Blob), constraints } }
 
         pub rule stmt_create_table() -> StmtCreateTable<'input>
-            = k("CREATE") _ k("TABLE") _ name:ident() _? "(" _? columns:column_def() ++ comma_separator() _? ")" { StmtCreateTable { name, columns } }
+            = k("CREATE") _ k("TABLE") _ name:(ident() / lit_string()) _? "(" _? columns:column_def() ++ comma_separator() _? ")" { StmtCreateTable { name, columns } }
 
         pub rule query() -> Query<'input>
             = dotcmd() / stmt_select()

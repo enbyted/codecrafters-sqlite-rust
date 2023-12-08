@@ -9,7 +9,7 @@ use crate::{
 };
 use nom::bytes::complete as bytes;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct TableLeafData<'a> {
     cells: &'a [u16],
     content_area: &'a [u8],
@@ -17,13 +17,14 @@ pub(crate) struct TableLeafData<'a> {
     usable_page_size: usize,
 }
 
-pub(crate) struct CellData<'a> {
+#[derive(Debug, Clone)]
+pub(crate) struct LeafCellData<'a> {
     data_in_leaf: &'a [u8],
     total_data_length: usize,
     overflow_page: Option<u32>,
 }
 
-impl CellData<'_> {
+impl LeafCellData<'_> {
     pub(crate) fn read(&self, db: &Database) -> Result<Cow<[u8]>> {
         if let Some(overflow_page) = self.overflow_page {
             let mut data = db.read_overflow_data(overflow_page)?;
@@ -38,8 +39,8 @@ impl CellData<'_> {
     }
 }
 
-impl TableLeafData<'_> {
-    pub(crate) fn read_cell(&self, index: usize) -> ParseResult<CellData<'_>> {
+impl<'a> TableLeafData<'a> {
+    pub(crate) fn read_cell(&self, index: usize) -> ParseResult<LeafCellData<'a>> {
         let offset = u16::from_be(self.cells[index]) as usize;
         assert!(offset >= self.offset_to_start_of_content);
         let offset = offset - self.offset_to_start_of_content;
@@ -80,7 +81,7 @@ impl TableLeafData<'_> {
 
         Ok((
             &[],
-            CellData {
+            LeafCellData {
                 data_in_leaf: cell_data,
                 total_data_length: length,
                 overflow_page,
@@ -136,10 +137,102 @@ impl<'a> ParseWithBlockOffset<'a> for TableLeafData<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+pub(crate) struct TableInteriorData<'a> {
+    cells: &'a [u16],
+    content_area: &'a [u8],
+    offset_to_start_of_content: usize,
+    usable_page_size: usize,
+    right_most_page: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TableInteriorCellData {
+    left_page: u32,
+    rowid: i64,
+}
+
+impl TableInteriorCellData {
+    pub(crate) fn left_page(&self) -> u32 {
+        self.left_page
+    }
+
+    pub(crate) fn rowid(&self) -> i64 {
+        self.rowid
+    }
+}
+
+impl TableInteriorData<'_> {
+    pub(crate) fn read_cell(&self, index: usize) -> ParseResult<TableInteriorCellData> {
+        let offset = u16::from_be(self.cells[index]) as usize;
+        assert!(offset >= self.offset_to_start_of_content);
+        let offset = offset - self.offset_to_start_of_content;
+
+        let cell_data = &self.content_area[offset..];
+        let (cell_data, left_page) = u32::parse(cell_data)?;
+        let (cell_data, rowid) = parse_varint(cell_data)?;
+
+        Ok((&[], TableInteriorCellData { left_page, rowid }))
+    }
+
+    pub(crate) fn cell_count(&self) -> usize {
+        self.cells.len()
+    }
+
+    pub(crate) fn right_most_page(&self) -> u32 {
+        self.right_most_page
+    }
+}
+
+impl<'a> ParseWithBlockOffset<'a> for TableInteriorData<'a> {
+    fn parse_in_block(
+        data: &'a [u8],
+        usable_page_size: usize,
+        offset_from_block_start: usize,
+    ) -> ParseResult<'a, TableInteriorData<'a>> {
+        let input_data = data;
+        let (data, _first_freeblock) = u16::parse(data)?;
+        let (data, number_of_cells) = u16::parse(data)?;
+        let (data, offset_to_start_of_content) = u16::parse(data)?;
+        let (data, _fragmented_free_bytes_count) = u8::parse(data)?;
+        let (data, right_most_page) = u32::parse(data)?;
+        let (_, cell_data) = bytes::take(number_of_cells as usize * 2)(data)?;
+        let offset_to_start_of_content = if offset_to_start_of_content == 0 {
+            65536
+        } else {
+            offset_to_start_of_content as usize
+        } - offset_from_block_start;
+
+        let content_area = &input_data[offset_to_start_of_content..];
+        let offset_to_start_of_content = offset_from_block_start
+            + (content_area.as_ptr() as usize - input_data.as_ptr() as usize);
+
+        // Safety:
+        //  1. The cell data is guaranteed to be properly aligned within block
+        //  2. We are transmuting primitive types, i.e. all bit patterns of 2-byte range are valid u16
+        //  3. The reads of these u16s will happen via u16::from_be() to guarantee endianness independence
+        let (begin, cells, end) = unsafe { cell_data.align_to::<u16>() };
+        // cell_data must have been properly aligned, unless we started with a not-aligned block, which is invalid
+        assert!(begin.is_empty());
+        assert!(end.is_empty());
+
+        Ok((
+            &[],
+            TableInteriorData {
+                cells,
+                content_area,
+                usable_page_size,
+                offset_to_start_of_content,
+                right_most_page,
+            },
+        ))
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum ParsedBTreePage<'a> {
     TableLeaf(TableLeafData<'a>),
-    TableInterior,
+    TableInterior(TableInteriorData<'a>),
     IndexLeaf,
     IndexInterior,
 }
@@ -153,8 +246,15 @@ impl<'a> ParseWithBlockOffset<'a> for ParsedBTreePage<'a> {
         let (data, type_value) = u8::parse(data)?;
         let ret = match type_value {
             2 => Ok((data, ParsedBTreePage::IndexInterior)),
-            5 => Ok((data, ParsedBTreePage::TableInterior)),
             10 => Ok((data, ParsedBTreePage::IndexLeaf)),
+            5 => {
+                let (rest, data) = TableInteriorData::parse_in_block(
+                    data,
+                    page_size,
+                    offset_from_block_start + 1,
+                )?;
+                Ok((rest, ParsedBTreePage::TableInterior(data)))
+            }
             13 => {
                 let (rest, data) =
                     TableLeafData::parse_in_block(data, page_size, offset_from_block_start + 1)?;
