@@ -1,5 +1,10 @@
 use anyhow::{bail, Context};
 use sqlite_starter_rust::error::Result;
+use sqlite_starter_rust::sql::data::{ColumnConstraint, ColumnDefinition, Query, TypeName};
+use sqlite_starter_rust::sql::{
+    data::{BinaryOperator, Expression, FunctionArguments, Literal},
+    parser,
+};
 use sqlite_starter_rust::{
     db::{
         schema::SchemaEntry,
@@ -10,195 +15,6 @@ use sqlite_starter_rust::{
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
-
-#[derive(Debug, Eq, PartialEq)]
-pub enum TypeName {
-    Integer,
-    Int,
-    String,
-    Blob,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub enum ColumnConstraint {
-    PrimaryKey,
-    AutoIncrement,
-    NotNull,
-}
-
-#[derive(Debug)]
-pub struct ColumnDefinition<'a> {
-    name: &'a str,
-    type_name: TypeName,
-    constraints: Vec<ColumnConstraint>,
-}
-
-#[derive(Debug)]
-pub enum FunctionArguments<'a> {
-    Star,
-    List(Vec<Expression<'a>>),
-}
-
-#[derive(Debug, Clone)]
-pub enum BinaryOperator {
-    Equals,
-}
-
-#[derive(Debug, Clone)]
-pub enum Literal<'a> {
-    String(&'a str),
-    Integer(i64),
-}
-
-#[derive(Debug)]
-pub enum Expression<'a> {
-    ColRef {
-        schema: Option<&'a str>,
-        table: Option<&'a str>,
-        column: &'a str,
-    },
-    Function {
-        name: &'a str,
-        arguments: FunctionArguments<'a>,
-    },
-    BinaryOp {
-        left: Box<Expression<'a>>,
-        right: Box<Expression<'a>>,
-        operator: BinaryOperator,
-    },
-    Literal(Literal<'a>),
-}
-
-#[derive(Debug)]
-pub struct ResultColumn<'a> {
-    value: Expression<'a>,
-    as_name: Option<&'a str>,
-}
-
-#[derive(Debug)]
-pub struct StmtSelect<'a> {
-    cols: Vec<ResultColumn<'a>>,
-    table: &'a str,
-    conditions: Vec<Expression<'a>>,
-}
-
-#[derive(Debug)]
-pub struct StmtCreateTable<'a> {
-    name: &'a str,
-    columns: Vec<ColumnDefinition<'a>>,
-}
-
-#[derive(Debug)]
-pub enum Query<'a> {
-    DotCmd(&'a str),
-    Select(StmtSelect<'a>),
-    CreateTable(StmtCreateTable<'a>),
-}
-
-peg::parser! {
-    grammar query_parser() for str {
-        rule dotcmd() -> Query<'input>
-            = "." cmd:$(['a'..='z']+) { Query::DotCmd(cmd) }
-
-        rule _()
-            = quiet!{[' ' | '\n' | '\r' | '\t']+}
-
-        rule comma_separator()
-            = _? "," _?
-
-        rule farg_star() -> FunctionArguments<'input>
-            = "*" { FunctionArguments::Star }
-
-        rule farg_list() -> FunctionArguments<'input>
-            = args:expr() ** comma_separator() { FunctionArguments::List(args) }
-
-        rule function_arguments() -> FunctionArguments<'input>
-            = farg_star() / farg_list()
-
-        rule lit_string() -> &'input str
-            = ("'" val:$([^'\'']*) "'" {val}) / ("\"" val:$([^'"']*) "\"" {val})
-
-        rule lit_integer() -> Literal<'input>
-            = val:$(['-']?['0'..='9']+) {? Ok(Literal::Integer(val.parse().map_err(|_| "expected integer literal")?)) }
-
-        rule literal() -> Literal<'input>
-            = (v:lit_string() {Literal::String(v)}) / lit_integer()
-
-        rule binary_operator() -> BinaryOperator
-            = "=" {BinaryOperator::Equals}
-
-        rule expr_literal() -> Expression<'input>
-            = value:literal() { Expression::Literal(value) }
-
-        rule expr_function() -> Expression<'input>
-            = name:$(['a'..='z' | 'A'..='Z']+) "(" _? arguments:function_arguments() _? ")" { Expression::Function { name, arguments } }
-
-        rule ident_with_dot() -> &'input str
-            = value:ident() "." { value }
-
-        rule expr_col_ref() -> Expression<'input>
-            = schema:ident_with_dot()? table:ident_with_dot()? column:ident(){ Expression::ColRef { schema, table, column } }
-
-        rule expr_base() -> Expression<'input>
-            = expr_literal() / expr_function() / expr_col_ref()
-
-        rule expr_binary_op() -> Expression<'input>
-            = left:expr_base() _? operator:binary_operator() _? right:expr_base() { Expression::BinaryOp { left: Box::new(left), right: Box::new(right), operator }}
-
-        rule expr() -> Expression<'input>
-            = expr_binary_op() / expr_base()
-
-        rule ident() -> &'input str
-            = ident_quoted() / ident_unquoted()
-
-        rule ident_unquoted() -> &'input str
-            = val:$(['a'..='z' | 'A'..='Z']['a'..='z' | 'A'..='Z' | '0'..='9' | '_']*) { val }
-
-        rule ident_quoted() -> &'input str
-            = "`" val:$([^'`']*) "`" { val }
-
-        rule as_ident() -> &'input str
-            = _ k("AS")  _ val:ident() { val }
-
-        rule result_column() -> ResultColumn<'input>
-            = _? value:expr() as_name:as_ident()? { ResultColumn { value, as_name } }
-
-        rule k(kw: &'static str)
-            = input:$([_]*<{kw.len()}>) {? if input.eq_ignore_ascii_case(kw) { Ok(()) } else { Err(kw) }}
-
-        rule where_clause() -> Vec<Expression<'input>>
-            = k("WHERE") _? exprs:expr() ++ comma_separator() { exprs }
-
-        rule stmt_select() -> Query<'input>
-            = k("SELECT") _ cols:result_column() ++ comma_separator() _ k("FROM") _ table:ident() _? conditions:where_clause()?{ Query::Select(StmtSelect { cols, table, conditions: conditions.unwrap_or_default() }) }
-
-        rule type_name() -> TypeName
-            = (k("INTEGER") {TypeName::Integer}) /
-              (k("INT") {TypeName::Int}) /
-              ((k("CHARACTER") / k("VARCHAR") / k("TEXT")) {TypeName::String}) /
-              (k("BLOB") {TypeName::Blob})
-
-        rule signed_number() -> i64
-            = val:$(['+' | '-']?['0'..='9']+) {? val.parse().map_err(|e| "Expected signed number") }
-
-        rule column_type() -> TypeName
-            = type_name:type_name() (_? "(" _? signed_number()**<1,2> comma_separator() _? ")"  )? { type_name }
-
-        rule column_constraint() -> ColumnConstraint
-            = (k("PRIMARY") _ k("KEY") {ColumnConstraint::PrimaryKey}) /
-              (k("AUTOINCREMENT") {ColumnConstraint::AutoIncrement}) /
-              (k("NOT") _ k("NULL") {ColumnConstraint::NotNull})
-
-        rule column_def() -> ColumnDefinition<'input>
-            = name:ident() type_name:(_ t:column_type() {t})? _? constraints:column_constraint() ** _ { ColumnDefinition { name, type_name: type_name.unwrap_or(TypeName::Blob), constraints } }
-
-        pub rule stmt_create_table() -> StmtCreateTable<'input>
-            = k("CREATE") _ k("TABLE") _ name:(ident() / lit_string()) _? "(" _? columns:column_def() ++ comma_separator() _? ")" { StmtCreateTable { name, columns } }
-
-        pub rule query() -> Query<'input>
-            = dotcmd() / stmt_select()
-    }
-}
 
 trait ExpressionExecutor {
     fn is_aggregate(&self) -> bool;
@@ -400,7 +216,7 @@ fn main() -> anyhow::Result<()> {
     let command = &args[2];
     let db = Database::open(&PathBuf::from(&args[1])).context("Reading database file")?;
 
-    match query_parser::query(command)? {
+    match parser::query(command)? {
         Query::DotCmd("dbinfo") => {
             println!("database page size: {}", db.header().page_size());
             let schema = db.read_schema()?;
@@ -434,7 +250,7 @@ fn main() -> anyhow::Result<()> {
             eprintln!("{select:?}");
             let table = db.read_table(select.table)?;
             eprintln!("Table sql: {}", table.sql());
-            let sql = query_parser::stmt_create_table(table.sql())?;
+            let sql = parser::stmt_create_table(table.sql())?;
             let is_rowid = |c: &&ColumnDefinition| {
                 c.type_name == TypeName::Integer
                     && c.constraints
