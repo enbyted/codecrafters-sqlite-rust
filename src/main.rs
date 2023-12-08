@@ -351,7 +351,7 @@ fn main() -> anyhow::Result<()> {
             for res in results {
                 for (i, col) in res.iter().enumerate() {
                     if i != 0 {
-                        print!("\t");
+                        print!("|");
                     }
                     print!("{}", col.to_string());
                 }
