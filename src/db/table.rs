@@ -18,10 +18,15 @@ pub struct Table<'a> {
     /// This exists to guarantee that the reference in root_page will be valid
     root_page_data: Arc<Page>,
     root_page: ParsedBTreePage<'a>,
+    sql: String,
 }
 
 impl<'a> Table<'a> {
-    pub(crate) fn new(database: &'a Database, root_page_id: u32) -> Result<'a, Table<'a>> {
+    pub(crate) fn new(
+        database: &'a Database,
+        root_page_id: u32,
+        sql: String,
+    ) -> Result<'a, Table<'a>> {
         let root_page_data = database.read_btree_page(root_page_id)?;
         let (_, root_page) = ParsedBTreePage::parse_in_block(
             unsafe { std::mem::transmute(root_page_data.data()) },
@@ -34,15 +39,20 @@ impl<'a> Table<'a> {
             database,
             root_page_data: root_page_data.clone(),
             root_page: root_page as ParsedBTreePage<'a>,
+            sql,
         })
     }
 
     pub fn iter<'b>(&'b self) -> TableIterator<'a, 'b> {
         TableIterator::new(self)
     }
+
+    pub fn sql(&self) -> &str {
+        &self.sql
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TableRowCell {
     Null,
     Integer(i64),

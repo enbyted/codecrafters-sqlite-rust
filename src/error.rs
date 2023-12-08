@@ -34,6 +34,8 @@ pub enum DbError<'a> {
 
     #[error("requested table `{0}` was not found")]
     TableNotFound(String),
+    #[error("requested column `{0}` was not found")]
+    ColumnNotFound(String),
 }
 
 impl DbError<'_> {
@@ -60,6 +62,7 @@ impl DbError<'_> {
                 DbError::InvalidColumnType { expected, got }
             }
             DbError::TableNotFound(table) => DbError::TableNotFound(table),
+            DbError::ColumnNotFound(col) => DbError::ColumnNotFound(col),
         }
     }
 }
