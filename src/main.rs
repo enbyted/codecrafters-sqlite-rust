@@ -38,6 +38,17 @@ pub enum FunctionArguments<'a> {
     List(Vec<Expression<'a>>),
 }
 
+#[derive(Debug, Clone)]
+pub enum BinaryOperator {
+    Equals,
+}
+
+#[derive(Debug, Clone)]
+pub enum Literal<'a> {
+    String(&'a str),
+    Integer(i64),
+}
+
 #[derive(Debug)]
 pub enum Expression<'a> {
     ColRef {
@@ -49,6 +60,12 @@ pub enum Expression<'a> {
         name: &'a str,
         arguments: FunctionArguments<'a>,
     },
+    BinaryOp {
+        left: Box<Expression<'a>>,
+        right: Box<Expression<'a>>,
+        operator: BinaryOperator,
+    },
+    Literal(Literal<'a>),
 }
 
 #[derive(Debug)]
@@ -61,6 +78,7 @@ pub struct ResultColumn<'a> {
 pub struct StmtSelect<'a> {
     cols: Vec<ResultColumn<'a>>,
     table: &'a str,
+    conditions: Vec<Expression<'a>>,
 }
 
 #[derive(Debug)]
@@ -96,6 +114,21 @@ peg::parser! {
         rule function_arguments() -> FunctionArguments<'input>
             = farg_star() / farg_list()
 
+        rule lit_string() -> Literal<'input>
+            = ("'" val:$([^'\'']*) "'" {Literal::String(val)}) / ("\"" val:$([^'"']*) "\"" {Literal::String(val)})
+
+        rule lit_integer() -> Literal<'input>
+            = val:$(['-']?['0'..='9']+) {? Ok(Literal::Integer(val.parse().map_err(|_| "expected integer literal")?)) }
+
+        rule literal() -> Literal<'input>
+            = lit_string() / lit_integer()
+
+        rule binary_operator() -> BinaryOperator
+            = "=" {BinaryOperator::Equals}
+
+        rule expr_literal() -> Expression<'input>
+            = value:literal() { Expression::Literal(value) }
+
         rule expr_function() -> Expression<'input>
             = name:$(['a'..='z' | 'A'..='Z']+) "(" _? arguments:function_arguments() _? ")" { Expression::Function { name, arguments } }
 
@@ -105,8 +138,14 @@ peg::parser! {
         rule expr_col_ref() -> Expression<'input>
             = schema:ident_with_dot()? table:ident_with_dot()? column:ident(){ Expression::ColRef { schema, table, column } }
 
+        rule expr_base() -> Expression<'input>
+            = expr_literal() / expr_function() / expr_col_ref()
+
+        rule expr_binary_op() -> Expression<'input>
+            = left:expr_base() _? operator:binary_operator() _? right:expr_base() { Expression::BinaryOp { left: Box::new(left), right: Box::new(right), operator }}
+
         rule expr() -> Expression<'input>
-            = expr_function() / expr_col_ref()
+            = expr_binary_op() / expr_base()
 
         rule ident() -> &'input str
             = ident_quoted() / ident_unquoted()
@@ -126,8 +165,11 @@ peg::parser! {
         rule k(kw: &'static str)
             = input:$([_]*<{kw.len()}>) {? if input.eq_ignore_ascii_case(kw) { Ok(()) } else { Err(kw) }}
 
+        rule where_clause() -> Vec<Expression<'input>>
+            = k("WHERE") _? exprs:expr() ++ comma_separator() { exprs }
+
         rule stmt_select() -> Query<'input>
-            = k("SELECT") _ cols:result_column() ++ comma_separator() _ k("FROM") _ table:ident() { Query::Select(StmtSelect { cols, table }) }
+            = k("SELECT") _ cols:result_column() ++ comma_separator() _ k("FROM") _ table:ident() _? conditions:where_clause()?{ Query::Select(StmtSelect { cols, table, conditions: conditions.unwrap_or_default() }) }
 
         rule type_name() -> TypeName
             = (k("INTEGER") {TypeName::Integer}) /
@@ -219,6 +261,82 @@ impl ExpressionExecutor for ColumnExtractionExecutor {
     }
 }
 
+struct LiteralExecutor(TableRowCell);
+
+impl LiteralExecutor {
+    pub fn new(literal: Literal) -> LiteralExecutor {
+        match literal {
+            Literal::String(str) => LiteralExecutor(TableRowCell::String(str.to_owned())),
+            Literal::Integer(val) => LiteralExecutor(TableRowCell::Integer(val)),
+        }
+    }
+}
+
+impl ExpressionExecutor for LiteralExecutor {
+    fn is_aggregate(&self) -> bool {
+        false
+    }
+
+    fn begin_aggregate_group(&mut self) {}
+
+    fn on_row(&mut self, _row: &TableRow) {}
+
+    fn value(&self) -> TableRowCell {
+        self.0.clone()
+    }
+}
+
+struct BinaryOpExecutor {
+    left: Box<dyn ExpressionExecutor>,
+    right: Box<dyn ExpressionExecutor>,
+    op: BinaryOperator,
+}
+
+impl BinaryOpExecutor {
+    pub fn new(
+        left: &Expression,
+        right: &Expression,
+        op: BinaryOperator,
+        column_map: &HashMap<&str, Option<usize>>,
+    ) -> Result<'static, BinaryOpExecutor> {
+        Ok(BinaryOpExecutor {
+            left: create_executor_for_expr(left, column_map)?,
+            right: create_executor_for_expr(right, column_map)?,
+            op,
+        })
+    }
+}
+
+impl ExpressionExecutor for BinaryOpExecutor {
+    fn is_aggregate(&self) -> bool {
+        self.left.is_aggregate() || self.right.is_aggregate()
+    }
+
+    fn begin_aggregate_group(&mut self) {
+        self.left.begin_aggregate_group();
+        self.right.begin_aggregate_group();
+    }
+
+    fn on_row(&mut self, row: &TableRow) {
+        self.left.on_row(row);
+        self.right.on_row(row);
+    }
+
+    fn value(&self) -> TableRowCell {
+        match self.op {
+            BinaryOperator::Equals => {
+                let left = self.left.value();
+                let right = self.right.value();
+                if left == right {
+                    TableRowCell::Integer(1)
+                } else {
+                    TableRowCell::Integer(0)
+                }
+            }
+        }
+    }
+}
+
 fn create_executor_for_expr(
     expr: &Expression,
     column_map: &HashMap<&str, Option<usize>>,
@@ -249,6 +367,17 @@ fn create_executor_for_expr(
             )),
             None => Err(DbError::ColumnNotFound(column.to_string())),
         },
+        Expression::Literal(lit) => Ok(Box::new(LiteralExecutor::new(lit.clone()))),
+        Expression::BinaryOp {
+            left,
+            right,
+            operator,
+        } => Ok(Box::new(BinaryOpExecutor::new(
+            left,
+            right,
+            operator.clone(),
+            column_map,
+        )?)),
         _ => Err(DbError::InvalidArgument(
             "result-column",
             format!("Unimplemented, got: {expr:?}"),
@@ -332,17 +461,31 @@ fn main() -> anyhow::Result<()> {
                 .map(|c| create_executor_for_expr(&c.value, &column_map))
                 .collect::<Result<Vec<_>>>()?;
 
+            let mut conditions = select
+                .conditions
+                .iter()
+                .map(|c| create_executor_for_expr(c, &column_map))
+                .collect::<Result<Vec<_>>>()?;
+
             let mut results = Vec::new();
             let is_aggregate = executors.iter().any(|e| e.is_aggregate());
+
+            let input = table.iter().filter(move |row| {
+                conditions.iter_mut().all(|c| {
+                    c.on_row(row);
+                    c.value().is_truthy()
+                })
+            });
+
             if is_aggregate {
                 executors.iter_mut().for_each(|r| r.begin_aggregate_group());
-                for row in table.iter() {
+                for row in input {
                     executors.iter_mut().for_each(|e| e.on_row(&row));
                 }
                 let res: Vec<_> = executors.iter().map(|e| e.value()).collect();
                 results.push(res);
             } else {
-                for row in table.iter() {
+                for row in input {
                     executors.iter_mut().for_each(|e| e.on_row(&row));
                     let res: Vec<_> = executors.iter().map(|e| e.value()).collect();
                     results.push(res);

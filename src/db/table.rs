@@ -52,7 +52,7 @@ impl<'a> Table<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TableRowCell {
     Null,
     Integer(i64),
@@ -103,6 +103,16 @@ impl TableRowCell {
             }
         };
         Ok((data, cell))
+    }
+
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            TableRowCell::Null => false,
+            TableRowCell::Integer(v) => *v != 0,
+            TableRowCell::Float(_) => todo!(),
+            TableRowCell::Blob(_) => todo!(),
+            TableRowCell::String(_) => todo!(),
+        }
     }
 }
 
