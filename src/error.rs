@@ -10,6 +10,8 @@ pub enum DbError<'a> {
         source: Box<DbError<'static>>,
         context: Vec<(&'static str, String)>,
     },
+    #[error("not yet implemented: {0}")]
+    Unimplemented(&'static str),
     #[error("parsing failed")]
     ParseError(nom::Err<nom::error::Error<&'a [u8]>>),
     #[error("parsing failed")]
@@ -60,6 +62,7 @@ pub enum DbError<'a> {
 impl DbError<'_> {
     pub fn to_owned<'a>(self) -> DbError<'static> {
         match self {
+            DbError::Unimplemented(msg) => DbError::Unimplemented(msg),
             DbError::ParseError(nom::Err::Error(err)) => DbError::OwnedParseError(nom::Err::Error(
                 nom::error::Error::new(Vec::from(err.input), err.code),
             )),

@@ -6,10 +6,17 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use self::{header::Header, page::Page, parse::Parse, schema::SchemaEntry, table::Table};
-use crate::error::{DbError, Result};
+use self::{
+    header::Header,
+    page::{btree::ParsedBTreePage, Page},
+    parse::{Parse, ParseWithBlockOffset},
+    schema::SchemaEntry,
+    table::Table,
+};
+use crate::error::{Context, DbError, Result};
 
 pub mod header;
+pub mod index;
 pub(crate) mod page;
 pub(crate) mod parse;
 pub mod query;
@@ -59,12 +66,26 @@ impl Database {
         let indexes = schema
             .iter()
             .filter_map(|schema| match schema {
-                SchemaEntry::Table(item) if item.table_name() == table_name => Some(item.clone()),
+                SchemaEntry::Index(item) if item.table_name() == table_name => Some(item.clone()),
                 _ => None,
             })
             .collect();
 
         Table::new(self, table_schema.clone(), indexes).map_err(|e| e.to_owned())
+    }
+
+    fn parse_btree_page<'a>(&'a self, page_id: u32) -> Result<'static, ParsedBTreePage<'a>> {
+        let page = self.read_btree_page(page_id)?;
+        let (_, page) = ParsedBTreePage::parse_in_block(
+            // Safety: The returned reference is to Arc<Page> that will be never modified.
+            //         The lifetime of the reference is tied to our lifetime, which is correct
+            unsafe { std::mem::transmute(page.data()) },
+            self.header().usable_page_size(),
+            page.offset_from_start(),
+        )
+        .add_context("database", format!("parsing btree page {page_id}"))?;
+
+        Ok(page)
     }
 
     fn read_btree_page(&self, page_id: u32) -> Result<'static, Arc<Page>> {

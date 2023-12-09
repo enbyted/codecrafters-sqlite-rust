@@ -3,13 +3,10 @@ use crate::{
     sql::{data::StmtCreateTable, parser},
 };
 use nom::bytes::complete as bytes;
-use std::sync::Arc;
 
 use super::{
-    page::{
-        btree::{LeafCellData, ParsedBTreePage},
-        Page,
-    },
+    index::Index,
+    page::btree::{LeafCellData, ParsedBTreePage},
     parse::{parse_int, parse_varint, Parse, ParseWithBlockOffset},
     schema::SchemaItem,
     Database,
@@ -18,12 +15,9 @@ use super::{
 #[derive(Debug)]
 pub struct Table<'a> {
     database: &'a Database,
-    #[allow(dead_code)]
-    /// This exists to guarantee that the reference in root_page will be valid
-    root_page_data: Arc<Page>,
     root_page: ParsedBTreePage<'a>,
     sql: StmtCreateTable<'static>,
-    indexes: Vec<SchemaItem>,
+    indexes: Vec<Index<'a>>,
 }
 
 impl<'a> Table<'a> {
@@ -36,19 +30,19 @@ impl<'a> Table<'a> {
         schema: SchemaItem,
         indexes: Vec<SchemaItem>,
     ) -> Result<'a, Table<'a>> {
-        let root_page_data = database.read_btree_page(schema.root_page())?;
-        let (_, root_page) = ParsedBTreePage::parse_in_block(
-            // Safety: The returned reference is to Arc<Page> that will be never modified.
-            unsafe { std::mem::transmute(root_page_data.data()) },
-            database.header().usable_page_size(),
-            root_page_data.offset_from_start(),
-        )
-        .map_err(|e| e.to_owned())?;
+        let root_page = database
+            .parse_btree_page(schema.root_page())
+            .add_context("table", schema.table_name().to_string())?;
+
+        let indexes = indexes
+            .into_iter()
+            .map(|schema| Index::new(database, schema))
+            .collect::<Result<'_, Vec<_>>>()
+            .add_context("table", schema.table_name().to_string())?;
 
         Ok(Table {
             database,
-            root_page_data: root_page_data.clone(),
-            root_page: root_page as ParsedBTreePage<'a>,
+            root_page,
             sql: parser::stmt_create_table(schema.sql())
                 .add_context("SQL", schema.sql().to_string())
                 .add_context("table", schema.name().to_string())?

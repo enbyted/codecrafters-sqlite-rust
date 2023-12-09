@@ -103,6 +103,9 @@ peg::parser! {
         pub rule stmt_create_table() -> StmtCreateTable<'input>
             = k("CREATE") _ k("TABLE") _ name:(ident() / lit_string()) _? "(" _? columns:column_def() ++ comma_separator() _? ")" { StmtCreateTable { name, columns } }
 
+        pub rule stmt_create_index() -> StmtCreateIndex<'input>
+            = k("CREATE") _ k("INDEX") _ name:(ident() / lit_string()) _ k("ON") _ table:(ident() / lit_string()) _? "(" _? column:(ident() / lit_string()) _? ")" { StmtCreateIndex { name, table, column } }
+
         pub rule query() -> Query<'input>
             = dotcmd() / stmt_select()
     }

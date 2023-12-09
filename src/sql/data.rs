@@ -181,10 +181,28 @@ impl StmtCreateTable<'_> {
 }
 
 #[derive(Debug, Clone)]
+pub struct StmtCreateIndex<'a> {
+    pub name: Cow<'a, str>,
+    pub table: Cow<'a, str>,
+    pub column: Cow<'a, str>,
+}
+
+impl StmtCreateIndex<'_> {
+    pub fn to_owned(&self) -> StmtCreateIndex<'static> {
+        StmtCreateIndex {
+            name: self.name.to_string().into(),
+            table: self.table.to_string().into(),
+            column: self.column.to_string().into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum Query<'a> {
     DotCmd(Cow<'a, str>),
     Select(StmtSelect<'a>),
     CreateTable(StmtCreateTable<'a>),
+    CreateIndex(StmtCreateIndex<'a>),
 }
 
 impl Query<'_> {
@@ -193,6 +211,7 @@ impl Query<'_> {
             Query::DotCmd(v) => Query::DotCmd(v.to_string().into()),
             Query::Select(v) => Query::Select(v.to_owned()),
             Query::CreateTable(v) => Query::CreateTable(v.to_owned()),
+            Query::CreateIndex(v) => Query::CreateIndex(v.to_owned()),
         }
     }
 }
