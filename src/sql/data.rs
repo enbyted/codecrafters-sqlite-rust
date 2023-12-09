@@ -20,6 +20,17 @@ pub struct ColumnDefinition<'a> {
     pub constraints: Vec<ColumnConstraint>,
 }
 
+impl ColumnDefinition<'_> {
+    pub fn is_rowid(&self) -> bool {
+        self.type_name == TypeName::Integer
+            && self
+                .constraints
+                .iter()
+                .find(|cn| **cn == ColumnConstraint::PrimaryKey)
+                .is_some()
+    }
+}
+
 #[derive(Debug)]
 pub enum FunctionArguments<'a> {
     Star,

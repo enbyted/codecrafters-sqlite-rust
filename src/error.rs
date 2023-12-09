@@ -36,6 +36,13 @@ pub enum DbError<'a> {
     TableNotFound(String),
     #[error("requested column `{0}` was not found")]
     ColumnNotFound(String),
+
+    #[error("received too many arguments, expected at most {1}, but got {0}")]
+    TooManyArguments(usize, usize),
+    #[error("received not enough arguments, expected at least {1}, but got {0}")]
+    NotEnoughArguments(usize, usize),
+    #[error("unknown function `{0}`")]
+    UnknownFunction(String),
 }
 
 impl DbError<'_> {
@@ -63,6 +70,11 @@ impl DbError<'_> {
             }
             DbError::TableNotFound(table) => DbError::TableNotFound(table),
             DbError::ColumnNotFound(col) => DbError::ColumnNotFound(col),
+            DbError::TooManyArguments(got, expected) => DbError::TooManyArguments(got, expected),
+            DbError::NotEnoughArguments(got, expected) => {
+                DbError::NotEnoughArguments(got, expected)
+            }
+            DbError::UnknownFunction(name) => DbError::UnknownFunction(name),
         }
     }
 }

@@ -12,6 +12,7 @@ use crate::error::{DbError, Result};
 pub mod header;
 pub(crate) mod page;
 pub(crate) mod parse;
+pub mod query;
 pub mod schema;
 pub mod table;
 
