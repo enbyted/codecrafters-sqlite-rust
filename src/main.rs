@@ -50,6 +50,12 @@ fn main() -> anyhow::Result<()> {
             }
             println!();
         }
+        Query::DotCmd("schema") => {
+            let schema = db.read_schema()?;
+            for table in schema.iter() {
+                println!("{table:?}");
+            }
+        }
         Query::Select(select) => {
             eprintln!("{select:?}");
             let table = db.read_table(select.table)?;
