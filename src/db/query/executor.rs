@@ -55,8 +55,14 @@ impl<'a> ExecutorFactory<'a> {
                 Some(ColumnRef::ColumnIndex(column_index)) => {
                     Ok(Box::new(ColumnExtractionExecutor::new(*column_index)))
                 }
-                Some(ColumnRef::Rowid) => todo!(),
-                None => Err(DbError::ColumnNotFound(column.to_string())),
+                Some(ColumnRef::Rowid) => Ok(Box::new(RowIdExtractor::new())),
+                None => {
+                    if column.eq_ignore_ascii_case("rowid") || column.eq_ignore_ascii_case("oid") {
+                        Ok(Box::new(RowIdExtractor::new()))
+                    } else {
+                        Err(DbError::ColumnNotFound(column.to_string()))
+                    }
+                }
             },
             Expression::ColRef { .. } => todo!("reading rowid columns is not supported yet"),
             Expression::Function { name, arguments } => {
@@ -146,6 +152,24 @@ impl ExpressionExecutor for CountExecutor {
 
     fn value(&self) -> TableRowCell {
         TableRowCell::Integer(self.count)
+    }
+}
+
+struct RowIdExtractor(TableRowCell);
+
+impl RowIdExtractor {
+    pub fn new() -> RowIdExtractor {
+        RowIdExtractor(TableRowCell::Null)
+    }
+}
+
+impl ExpressionExecutor for RowIdExtractor {
+    fn on_row(&mut self, row: &TableRow) {
+        self.0 = TableRowCell::Integer(row.rowid());
+    }
+
+    fn value(&self) -> TableRowCell {
+        self.0.clone()
     }
 }
 
