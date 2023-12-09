@@ -97,7 +97,7 @@ peg::parser! {
               (k("NOT") _ k("NULL") {ColumnConstraint::NotNull})
 
         rule column_def() -> ColumnDefinition<'input>
-            = name:ident() type_name:(_ t:column_type() {t})? _? constraints:column_constraint() ** _ { ColumnDefinition { name, type_name: type_name.unwrap_or(TypeName::Blob), constraints } }
+            = name:(ident() / lit_string()) type_name:(_ t:column_type() {t})? _? constraints:column_constraint() ** _ { ColumnDefinition { name, type_name: type_name.unwrap_or(TypeName::Blob), constraints } }
 
         pub rule stmt_create_table() -> StmtCreateTable<'input>
             = k("CREATE") _ k("TABLE") _ name:(ident() / lit_string()) _? "(" _? columns:column_def() ++ comma_separator() _? ")" { StmtCreateTable { name, columns } }
