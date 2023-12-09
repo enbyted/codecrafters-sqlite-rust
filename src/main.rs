@@ -21,44 +21,49 @@ fn main() -> anyhow::Result<()> {
     let db = Database::open(&PathBuf::from(&args[1])).context("Reading database file")?;
 
     match parser::query(command)? {
-        Query::DotCmd("dbinfo") => {
-            println!("database page size: {}", db.header().page_size());
-            let schema = db.read_schema()?;
-            let table_count = schema
-                .iter()
-                .filter(|t| match t {
-                    SchemaEntry::Table { name, .. } => !name.starts_with("sqlite_"),
-                    _ => false,
-                })
-                .count();
-            println!("number of tables: {table_count}");
-        }
-        Query::DotCmd("tables") => {
-            let schema = db.read_schema()?;
-            let table_names = schema.iter().filter_map(|t| match t {
-                SchemaEntry::Table { name, .. } => {
-                    if !name.starts_with("sqlite_") {
-                        Some(name)
-                    } else {
-                        None
+        Query::DotCmd(c) => match c.as_ref() {
+            "dbinfo" => {
+                println!("database page size: {}", db.header().page_size());
+                let schema = db.read_schema()?;
+                let table_count = schema
+                    .iter()
+                    .filter(|t| match t {
+                        SchemaEntry::Table(table) => !table.is_internal(),
+                        _ => false,
+                    })
+                    .count();
+                println!("number of tables: {table_count}");
+            }
+            "tables" => {
+                let schema = db.read_schema()?;
+                let table_names = schema.iter().filter_map(|t| match t {
+                    SchemaEntry::Table(table) => {
+                        if !table.is_internal() {
+                            Some(table.name())
+                        } else {
+                            None
+                        }
                     }
+                    _ => None,
+                });
+                for table in table_names {
+                    print!("{table} ");
                 }
-                _ => None,
-            });
-            for table in table_names {
-                print!("{table} ");
+                println!();
             }
-            println!();
-        }
-        Query::DotCmd("schema") => {
-            let schema = db.read_schema()?;
-            for table in schema.iter() {
-                println!("{table:?}");
+            "schema" => {
+                let schema = db.read_schema()?;
+                for table in schema.iter() {
+                    println!("{table:?}");
+                }
             }
-        }
+            _ => {
+                anyhow::bail!("Invalid command .{}", c);
+            }
+        },
         Query::Select(select) => {
             eprintln!("{select:?}");
-            let table = db.read_table(select.table)?;
+            let table = db.read_table(select.table.as_ref())?;
             eprintln!("Table sql: {}", table.sql());
             let sql = parser::stmt_create_table(table.sql())?;
 
@@ -68,9 +73,9 @@ fn main() -> anyhow::Result<()> {
                 .enumerate()
                 .map(|(k, v)| {
                     if v.is_rowid() {
-                        (v.name, ColumnRef::Rowid)
+                        (v.name.as_ref(), ColumnRef::Rowid)
                     } else {
-                        (v.name, ColumnRef::ColumnIndex(k))
+                        (v.name.as_ref(), ColumnRef::ColumnIndex(k))
                     }
                 })
                 .collect();

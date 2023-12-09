@@ -1,11 +1,12 @@
 pub mod data;
 
 use self::data::*;
+use std::borrow::Cow;
 
 peg::parser! {
     pub grammar parser() for str {
         rule dotcmd() -> Query<'input>
-            = "." cmd:$(['a'..='z']+) { Query::DotCmd(cmd) }
+            = "." cmd:$(['a'..='z']+) { Query::DotCmd(cmd.into()) }
 
         rule _()
             = quiet!{[' ' | '\n' | '\r' | '\t']+}
@@ -22,14 +23,14 @@ peg::parser! {
         rule function_arguments() -> FunctionArguments<'input>
             = farg_star() / farg_list()
 
-        rule lit_string() -> &'input str
-            = ("'" val:$([^'\'']*) "'" {val}) / ("\"" val:$([^'"']*) "\"" {val})
+        rule lit_string() -> Cow<'input, str>
+            = ("'" val:$([^'\'']*) "'" {val.into()}) / ("\"" val:$([^'"']*) "\"" {val.into()})
 
         rule lit_integer() -> Literal<'input>
             = val:$(['-']?['0'..='9']+) {? Ok(Literal::Integer(val.parse().map_err(|_| "expected integer literal")?)) }
 
         rule literal() -> Literal<'input>
-            = (v:lit_string() {Literal::String(v)}) / lit_integer()
+            = (v:lit_string() {Literal::String(v.into())}) / lit_integer()
 
         rule binary_operator() -> BinaryOperator
             = "=" {BinaryOperator::Equals}
@@ -38,13 +39,13 @@ peg::parser! {
             = value:literal() { Expression::Literal(value) }
 
         rule expr_function() -> Expression<'input>
-            = name:$(['a'..='z' | 'A'..='Z']+) "(" _? arguments:function_arguments() _? ")" { Expression::Function { name, arguments } }
+            = name:ident_unquoted() "(" _? arguments:function_arguments() _? ")" { Expression::Function { name, arguments } }
 
-        rule ident_with_dot() -> &'input str
+        rule ident_with_dot() -> Cow<'input,str>
             = value:ident() "." { value }
 
         rule expr_col_ref() -> Expression<'input>
-            = schema:ident_with_dot()? table:ident_with_dot()? column:ident(){ Expression::ColRef { schema, table, column } }
+            = schema:ident_with_dot()? table:ident_with_dot()? column:ident(){ Expression::ColRef { schema: schema, table, column } }
 
         rule expr_base() -> Expression<'input>
             = expr_literal() / expr_function() / expr_col_ref()
@@ -55,16 +56,16 @@ peg::parser! {
         rule expr() -> Expression<'input>
             = expr_binary_op() / expr_base()
 
-        rule ident() -> &'input str
+        rule ident() -> Cow<'input, str>
             = ident_quoted() / ident_unquoted()
 
-        rule ident_unquoted() -> &'input str
-            = val:$(['a'..='z' | 'A'..='Z']['a'..='z' | 'A'..='Z' | '0'..='9' | '_']*) { val }
+        rule ident_unquoted() -> Cow<'input, str>
+            = val:$(['a'..='z' | 'A'..='Z']['a'..='z' | 'A'..='Z' | '0'..='9' | '_']*) { val.into() }
 
-        rule ident_quoted() -> &'input str
-            = "`" val:$([^'`']*) "`" { val }
+        rule ident_quoted() -> Cow<'input, str>
+            = "`" val:$([^'`']*) "`" { val.into() }
 
-        rule as_ident() -> &'input str
+        rule as_ident() -> Cow<'input, str>
             = _ k("AS")  _ val:ident() { val }
 
         rule result_column() -> ResultColumn<'input>

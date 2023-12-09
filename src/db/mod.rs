@@ -39,7 +39,7 @@ impl Database {
     }
 
     pub fn read_schema(&self) -> Result<'static, Vec<SchemaEntry>> {
-        let schema_table = Table::new(self, 1, String::new()).map_err(|e| e.to_owned())?;
+        let schema_table = Table::schema_table(self).map_err(|e| e.to_owned())?;
         schema_table
             .iter()
             .map(|r| SchemaEntry::from_row(r))
@@ -47,21 +47,24 @@ impl Database {
     }
 
     pub fn read_table(&self, table_name: &str) -> Result<'static, Table<'_>> {
-        let (root_page, sql) = self
-            .read_schema()?
-            .into_iter()
+        let schema = self.read_schema()?;
+        let table_schema = schema
+            .iter()
             .find_map(|schema| match schema {
-                SchemaEntry::Table {
-                    name,
-                    root_page,
-                    sql,
-                    ..
-                } if name == table_name => Some((root_page, sql)),
+                SchemaEntry::Table(item) if item.name() == table_name => Some(item),
                 _ => None,
             })
             .ok_or_else(|| DbError::TableNotFound(table_name.to_owned()))?;
 
-        Table::new(self, root_page, sql).map_err(|e| e.to_owned())
+        let indexes = schema
+            .iter()
+            .filter_map(|schema| match schema {
+                SchemaEntry::Table(item) if item.table_name() == table_name => Some(item.clone()),
+                _ => None,
+            })
+            .collect();
+
+        Table::new(self, table_schema.clone(), indexes).map_err(|e| e.to_owned())
     }
 
     fn read_btree_page(&self, page_id: u32) -> Result<'static, Arc<Page>> {

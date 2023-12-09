@@ -5,14 +5,49 @@ use crate::{
 
 use super::table::TableRow;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+pub struct SchemaItem {
+    name: String,
+    table_name: String,
+    root_page: u32,
+    sql: String,
+}
+
+impl SchemaItem {
+    pub(crate) fn for_schema_table() -> SchemaItem {
+        SchemaItem {
+            name: "schema".to_owned(),
+            table_name: "schema".to_owned(),
+            root_page: 1,
+            sql: String::new(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn is_internal(&self) -> bool {
+        self.name.starts_with("sqlite_")
+    }
+
+    pub fn table_name(&self) -> &str {
+        &self.table_name
+    }
+
+    pub fn root_page(&self) -> u32 {
+        self.root_page
+    }
+
+    pub fn sql(&self) -> &str {
+        &self.sql
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum SchemaEntry {
-    Table {
-        name: String,
-        table_name: String,
-        root_page: u32,
-        sql: String,
-    },
+    Table(SchemaItem),
+    Index(SchemaItem),
     Unknown {
         type_text: String,
         name: String,
@@ -46,12 +81,18 @@ impl SchemaEntry {
         let sql = parse_column_with_value!(cells, "sql", String)?.clone();
 
         Ok(match type_text.as_str() {
-            "table" => SchemaEntry::Table {
+            "table" => SchemaEntry::Table(SchemaItem {
                 name,
                 table_name,
                 root_page,
                 sql,
-            },
+            }),
+            "index" => SchemaEntry::Index(SchemaItem {
+                name,
+                table_name,
+                root_page,
+                sql,
+            }),
             _ => SchemaEntry::Unknown {
                 type_text,
                 name,

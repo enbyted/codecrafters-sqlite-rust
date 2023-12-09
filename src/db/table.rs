@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use super::{
     page::{
-        btree::{LeafCellData, ParsedBTreePage, TableLeafData},
+        btree::{LeafCellData, ParsedBTreePage},
         Page,
     },
     parse::{parse_int, parse_varint, Parse, ParseWithBlockOffset},
+    schema::SchemaItem,
     Database,
 };
 
@@ -19,16 +20,22 @@ pub struct Table<'a> {
     root_page_data: Arc<Page>,
     root_page: ParsedBTreePage<'a>,
     sql: String,
+    indexes: Vec<SchemaItem>,
 }
 
 impl<'a> Table<'a> {
+    pub(crate) fn schema_table(database: &'a Database) -> Result<'a, Table<'a>> {
+        Self::new(database, SchemaItem::for_schema_table(), Vec::new())
+    }
+
     pub(crate) fn new(
         database: &'a Database,
-        root_page_id: u32,
-        sql: String,
+        schema: SchemaItem,
+        indexes: Vec<SchemaItem>,
     ) -> Result<'a, Table<'a>> {
-        let root_page_data = database.read_btree_page(root_page_id)?;
+        let root_page_data = database.read_btree_page(schema.root_page())?;
         let (_, root_page) = ParsedBTreePage::parse_in_block(
+            // Safety: The returned reference is to Arc<Page> that will be never modified.
             unsafe { std::mem::transmute(root_page_data.data()) },
             database.header().usable_page_size(),
             root_page_data.offset_from_start(),
@@ -39,7 +46,8 @@ impl<'a> Table<'a> {
             database,
             root_page_data: root_page_data.clone(),
             root_page: root_page as ParsedBTreePage<'a>,
-            sql,
+            sql: schema.sql().to_owned(),
+            indexes,
         })
     }
 
@@ -243,7 +251,7 @@ impl<'db> TableIterator<'_, 'db> {
                 PageItem::Cell(data) => return Ok(Some(data)),
                 PageItem::EndOfPage => {
                     current_cell.pop();
-                    if let Some((page, index)) = self.current_cell.last_mut() {
+                    if let Some((_page, index)) = self.current_cell.last_mut() {
                         *index += 1;
                     } else {
                         return Ok(None);

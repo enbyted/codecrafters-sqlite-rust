@@ -142,7 +142,6 @@ pub(crate) struct TableInteriorData<'a> {
     cells: &'a [u16],
     content_area: &'a [u8],
     offset_to_start_of_content: usize,
-    usable_page_size: usize,
     right_most_page: u32,
 }
 
@@ -172,7 +171,7 @@ impl TableInteriorData<'_> {
         let (cell_data, left_page) = u32::parse(cell_data)?;
         let (cell_data, rowid) = parse_varint(cell_data)?;
 
-        Ok((&[], TableInteriorCellData { left_page, rowid }))
+        Ok((cell_data, TableInteriorCellData { left_page, rowid }))
     }
 
     pub(crate) fn cell_count(&self) -> usize {
@@ -187,7 +186,7 @@ impl TableInteriorData<'_> {
 impl<'a> ParseWithBlockOffset<'a> for TableInteriorData<'a> {
     fn parse_in_block(
         data: &'a [u8],
-        usable_page_size: usize,
+        _usable_page_size: usize,
         offset_from_block_start: usize,
     ) -> ParseResult<'a, TableInteriorData<'a>> {
         let input_data = data;
@@ -221,7 +220,6 @@ impl<'a> ParseWithBlockOffset<'a> for TableInteriorData<'a> {
             TableInteriorData {
                 cells,
                 content_area,
-                usable_page_size,
                 offset_to_start_of_content,
                 right_most_page,
             },

@@ -51,7 +51,7 @@ impl<'a> ExecutorFactory<'a> {
                 schema: None,
                 table: None,
                 column,
-            } => match self.column_map.get(column) {
+            } => match self.column_map.get(column.as_ref()) {
                 Some(ColumnRef::ColumnIndex(column_index)) => {
                     Ok(Box::new(ColumnExtractionExecutor::new(*column_index)))
                 }
@@ -246,7 +246,7 @@ struct LiteralExecutor(TableRowCell);
 impl LiteralExecutor {
     pub fn new(literal: Literal) -> LiteralExecutor {
         match literal {
-            Literal::String(str) => LiteralExecutor(TableRowCell::String(str.to_owned())),
+            Literal::String(str) => LiteralExecutor(TableRowCell::String(str.to_string())),
             Literal::Integer(val) => LiteralExecutor(TableRowCell::Integer(val)),
         }
     }
