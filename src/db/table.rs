@@ -1,4 +1,7 @@
-use crate::error::{ParseResult, Result};
+use crate::{
+    error::{Context, ParseResult, Result},
+    sql::{data::StmtCreateTable, parser},
+};
 use nom::bytes::complete as bytes;
 use std::sync::Arc;
 
@@ -19,7 +22,7 @@ pub struct Table<'a> {
     /// This exists to guarantee that the reference in root_page will be valid
     root_page_data: Arc<Page>,
     root_page: ParsedBTreePage<'a>,
-    sql: String,
+    sql: StmtCreateTable<'static>,
     indexes: Vec<SchemaItem>,
 }
 
@@ -46,7 +49,10 @@ impl<'a> Table<'a> {
             database,
             root_page_data: root_page_data.clone(),
             root_page: root_page as ParsedBTreePage<'a>,
-            sql: schema.sql().to_owned(),
+            sql: parser::stmt_create_table(schema.sql())
+                .add_context("SQL", schema.sql().to_string())
+                .add_context("table", schema.name().to_string())?
+                .to_owned(),
             indexes,
         })
     }
@@ -55,7 +61,7 @@ impl<'a> Table<'a> {
         TableIterator::new(self)
     }
 
-    pub fn sql(&self) -> &str {
+    pub fn sql(&self) -> &StmtCreateTable<'a> {
         &self.sql
     }
 }

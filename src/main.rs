@@ -64,10 +64,10 @@ fn main() -> anyhow::Result<()> {
         Query::Select(select) => {
             eprintln!("{select:?}");
             let table = db.read_table(select.table.as_ref())?;
-            eprintln!("Table sql: {}", table.sql());
-            let sql = parser::stmt_create_table(table.sql())?;
+            eprintln!("Table sql: {:?}", table.sql());
 
-            let column_map: HashMap<&str, ColumnRef> = sql
+            let column_map: HashMap<&str, ColumnRef> = table
+                .sql()
                 .columns
                 .iter()
                 .enumerate()
@@ -80,7 +80,6 @@ fn main() -> anyhow::Result<()> {
                 })
                 .collect();
 
-            eprintln!("Parsed table sql: {sql:?}");
             eprintln!("Column map: {column_map:?}");
             let executor_factory = ExecutorFactory::new(&column_map);
             let mut executors = select

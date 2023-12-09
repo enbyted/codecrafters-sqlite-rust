@@ -1,9 +1,15 @@
 use std::sync::PoisonError;
 
+use peg::str::LineCol;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum DbError<'a> {
+    #[error("{source}{}", context.iter().cloned().map(|(name, v)| format!("\n - {name}: {v}")).collect::<String>())]
+    WithContext {
+        source: Box<DbError<'static>>,
+        context: Vec<(&'static str, String)>,
+    },
     #[error("parsing failed")]
     ParseError(nom::Err<nom::error::Error<&'a [u8]>>),
     #[error("parsing failed")]
@@ -43,6 +49,12 @@ pub enum DbError<'a> {
     NotEnoughArguments(usize, usize),
     #[error("unknown function `{0}`")]
     UnknownFunction(String),
+
+    #[error("SQL parse error")]
+    SqlParseError {
+        #[from]
+        source: peg::error::ParseError<LineCol>,
+    },
 }
 
 impl DbError<'_> {
@@ -75,6 +87,24 @@ impl DbError<'_> {
                 DbError::NotEnoughArguments(got, expected)
             }
             DbError::UnknownFunction(name) => DbError::UnknownFunction(name),
+            DbError::SqlParseError { source } => DbError::SqlParseError { source },
+            DbError::WithContext { source, context } => DbError::WithContext { source, context },
+        }
+    }
+
+    pub fn add_context(self, name: &'static str, context_str: String) -> DbError<'static> {
+        match self {
+            DbError::WithContext {
+                source,
+                mut context,
+            } => {
+                context.push((name, context_str));
+                DbError::WithContext { source, context }
+            }
+            other => DbError::WithContext {
+                source: Box::new(other.to_owned()),
+                context: [(name, context_str)].into(),
+            },
         }
     }
 }
@@ -102,5 +132,30 @@ impl<'a> Into<nom::Err<DbError<'a>>> for DbError<'a> {
     }
 }
 
+pub trait Context {
+    type Output;
+
+    fn add_context(self, name: &'static str, context: String) -> Result<'static, Self::Output>;
+}
+
 pub type ParseResult<'a, O> = std::result::Result<(&'a [u8], O), DbError<'a>>;
 pub type Result<'a, O> = std::result::Result<O, DbError<'a>>;
+
+impl<O> Context for Result<'_, O> {
+    type Output = O;
+
+    fn add_context(self, name: &'static str, context: String) -> Result<'static, O> {
+        self.map_err(|e| e.add_context(name, context))
+    }
+}
+
+impl<O> Context for std::result::Result<O, peg::error::ParseError<LineCol>> {
+    type Output = O;
+
+    fn add_context(self, name: &'static str, context: String) -> Result<'static, O> {
+        match self {
+            Ok(o) => Ok(o),
+            Err(err) => Err(DbError::from(err).add_context(name, context)),
+        }
+    }
+}

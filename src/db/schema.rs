@@ -19,7 +19,14 @@ impl SchemaItem {
             name: "schema".to_owned(),
             table_name: "schema".to_owned(),
             root_page: 1,
-            sql: String::new(),
+            sql: "CREATE TABLE sqlite_schema(
+                type text,
+                name text,
+                tbl_name text,
+                rootpage integer,
+                sql text
+              )"
+            .to_string(),
         }
     }
 
