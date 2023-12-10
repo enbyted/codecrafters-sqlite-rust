@@ -1,6 +1,6 @@
 use super::{page::btree::ParsedBTreePage, schema::SchemaItem, Database};
 use crate::{
-    error::{Context, DbError, Result},
+    error::{Context, Result},
     sql::parser,
 };
 
