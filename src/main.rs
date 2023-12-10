@@ -1,5 +1,6 @@
 use anyhow::{bail, Context};
 use sqlite_starter_rust::db::query::{ColumnRef, ExecutorFactory};
+use sqlite_starter_rust::db::table::TableRow;
 use sqlite_starter_rust::db::{schema::SchemaEntry, Database};
 use sqlite_starter_rust::error::Result;
 use sqlite_starter_rust::sql::data::Query;
@@ -103,12 +104,34 @@ fn main() -> anyhow::Result<()> {
             let mut results = Vec::new();
             let is_aggregate = executors.iter().any(|e| e.is_aggregate());
 
-            let input = table.iter().filter(move |row| {
-                conditions.iter_mut().all(|c| {
-                    c.on_row(row);
-                    c.value().is_truthy()
-                })
-            });
+            let input: Box<dyn Iterator<Item = TableRow>> =
+                if let Some(condition) = conditions.first() {
+                    if condition.can_provide_rowids_from_index() {
+                        eprintln!("Using index to accelerate first condition");
+                        let (first, rest) = conditions
+                            .split_first_mut()
+                            .expect("We've already checked that first exists");
+
+                        Box::new(first.filter_map(|rowid| table.get_row(rowid)).filter(
+                            move |row| {
+                                rest.iter_mut().all(|c| {
+                                    c.on_row(row);
+                                    c.value().is_truthy()
+                                })
+                            },
+                        ))
+                    } else {
+                        eprintln!("Not using any indexes");
+                        Box::new(table.iter().filter(move |row| {
+                            conditions.iter_mut().all(|c| {
+                                c.on_row(row);
+                                c.value().is_truthy()
+                            })
+                        }))
+                    }
+                } else {
+                    Box::new(table.iter())
+                };
 
             if is_aggregate {
                 executors.iter_mut().for_each(|r| r.begin_aggregate_group());

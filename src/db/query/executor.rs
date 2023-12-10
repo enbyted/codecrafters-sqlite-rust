@@ -13,9 +13,23 @@ pub trait ExpressionExecutor {
     fn is_aggregate(&self) -> bool {
         false
     }
+    fn can_provide_rowids_from_index(&self) -> bool {
+        false
+    }
+    fn next_rowid_from_index(&mut self) -> Option<i64> {
+        None
+    }
     fn begin_aggregate_group(&mut self) {}
     fn on_row(&mut self, row: &TableRow);
     fn value(&self) -> TableRowCell;
+}
+
+impl Iterator for Box<dyn ExpressionExecutor> {
+    type Item = i64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_rowid_from_index()
+    }
 }
 
 #[derive(Debug, Clone)]

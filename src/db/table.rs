@@ -51,6 +51,10 @@ impl<'a> Table<'a> {
         })
     }
 
+    pub fn get_row(&self, rowid: i64) -> Option<TableRow> {
+        todo!()
+    }
+
     pub fn get_index(&self, column_name: &str) -> Option<Index<'a>> {
         self.indexes
             .iter()
