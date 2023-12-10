@@ -51,6 +51,13 @@ impl<'a> Table<'a> {
         })
     }
 
+    pub fn get_index(&self, column_name: &str) -> Option<Index<'a>> {
+        self.indexes
+            .iter()
+            .find(|i| i.column_name() == column_name)
+            .map(|i| i.clone())
+    }
+
     pub fn iter<'b>(&'b self) -> TableIterator<'a, 'b> {
         TableIterator::new(self)
     }

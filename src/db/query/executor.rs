@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use crate::{
-    db::table::{TableRow, TableRowCell},
+    db::{
+        index::Index,
+        table::{TableRow, TableRowCell},
+    },
     error::{DbError, Result},
     sql::data::{BinaryOperator, Expression, FunctionArguments, Literal},
 };
@@ -15,8 +18,9 @@ pub trait ExpressionExecutor {
     fn value(&self) -> TableRowCell;
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum ColumnRef {
+#[derive(Debug, Clone)]
+pub enum ColumnRef<'a> {
+    ColumnWithIndex(usize, Index<'a>),
     ColumnIndex(usize),
     Rowid,
 }
@@ -26,7 +30,7 @@ type FunctionCreator<'a> =
 
 #[derive(Debug)]
 pub struct ExecutorFactory<'a> {
-    column_map: &'a HashMap<&'a str, ColumnRef>,
+    column_map: &'a HashMap<&'a str, ColumnRef<'a>>,
     function_creators: HashMap<&'static str, FunctionCreator<'a>>,
 }
 
@@ -52,7 +56,8 @@ impl<'a> ExecutorFactory<'a> {
                 table: None,
                 column,
             } => match self.column_map.get(column.as_ref()) {
-                Some(ColumnRef::ColumnIndex(column_index)) => {
+                Some(ColumnRef::ColumnWithIndex(column_index, _))
+                | Some(ColumnRef::ColumnIndex(column_index)) => {
                     Ok(Box::new(ColumnExtractionExecutor::new(*column_index)))
                 }
                 Some(ColumnRef::Rowid) => Ok(Box::new(RowIdExtractor::new())),

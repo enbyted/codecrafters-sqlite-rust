@@ -74,6 +74,8 @@ fn main() -> anyhow::Result<()> {
                 .map(|(k, v)| {
                     if v.is_rowid() {
                         (v.name.as_ref(), ColumnRef::Rowid)
+                    } else if let Some(index) = table.get_index(v.name.as_ref()) {
+                        (v.name.as_ref(), ColumnRef::ColumnWithIndex(k, index))
                     } else {
                         (v.name.as_ref(), ColumnRef::ColumnIndex(k))
                     }
